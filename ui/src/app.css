@@ -1,0 +1,52 @@
+:root {
+  --bg: #111827;
+  --panel: #1f2937;
+  --line: #374151;
+  --text: #f9fafb;
+  --muted: #9ca3af;
+  --accent: #2563eb;
+  --new: #16a34a;
+  --touch: 56px; /* smallest comfortable target for a finger in a moving car */
+  font: 18px/1.4 system-ui, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+button,
+input,
+.button {
+  font: inherit;
+  color: inherit;
+  min-height: var(--touch);
+  min-width: var(--touch);
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+button,
+.button {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
+button.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}

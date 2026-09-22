@@ -1,0 +1,29 @@
+# Every key is optional; these are the defaults unless noted.
+# The DATABASE_URL environment variable overrides database_url.
+
+database_url = "postgres://carputer@localhost/carputer"
+listen = "0.0.0.0:8000"
+# ui_dir = "/usr/share/carputer/ui"
+
+# Offline maps: *.pmtiles regions, plus assets/ (fonts, sprites; see
+# tools/fetch_map_assets.sh). Downloading regions needs the `pmtiles` CLI.
+maps_dir = "/var/lib/carputer/maps"
+# map_source = "https://build.protomaps.com/20260917.pmtiles"  # default: latest build
+
+# Sources. Remove a line to disable that source.
+gpsd = "127.0.0.1:2947"
+# aprs_kiss = "127.0.0.1:8001"   # Direwolf KISS port, fed by rtl_fm (default: off)
+
+track_idle = 300    # seconds without movement before a track ends
+road_radius = 25    # metres; an old track this close...
+road_heading = 35   # ...and within this many degrees of our heading = known road
+
+# SmartBeaconing as a storage policy (m/s, seconds, degrees).
+[beacon]
+low_speed = 2.0
+high_speed = 27.0
+slow_rate = 120
+fast_rate = 15
+turn_min = 10
+turn_slope = 110
+turn_time = 3

@@ -1,0 +1,20 @@
+[Unit]
+Description=Carputer daemon
+After=postgresql.service gpsd.service network.target
+Wants=postgresql.service
+
+[Service]
+User=carputer
+ExecStart=/usr/local/bin/carputerd /etc/carputer/carputerd.toml
+Restart=always
+RestartSec=2
+# Port 80 without root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/carputer
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Carputer sensor simulator (pretend gpsd and APRS TNC)
+Before=carputerd.service
+
+[Service]
+DynamicUser=yes
+ExecStart=/usr/local/bin/carputer-sim --gpsd 12947 --kiss 18001
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

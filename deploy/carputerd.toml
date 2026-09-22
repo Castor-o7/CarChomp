@@ -1,0 +1,9 @@
+# Installed as /etc/carputer/carputerd.toml. All keys: carputerd.example.toml
+
+# Peer authentication over the local socket: no password to keep anywhere.
+database_url = "postgres:///carputer?host=/var/run/postgresql"
+listen = "0.0.0.0:80"
+ui_dir = "/usr/share/carputer/ui"
+maps_dir = "/var/lib/carputer/maps"
+gpsd = "127.0.0.1:2947"
+# aprs_kiss = "127.0.0.1:8001"
