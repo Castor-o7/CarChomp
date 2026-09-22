@@ -9,7 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get},
 };
-use carputer_core::nm;
+use carchomp_core::nm;
 use serde::Deserialize;
 use tokio::process::Command;
 

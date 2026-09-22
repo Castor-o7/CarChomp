@@ -92,7 +92,7 @@ fn collect_geojson(v: &Value, name: Option<&str>, out: &mut Vec<Track>) {
 pub fn to_gpx(name: Option<&str>, points: &[Point]) -> String {
     let mut gpx = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
-         <gpx version=\"1.1\" creator=\"carputer\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n<trk>\n",
+         <gpx version=\"1.1\" creator=\"carchomp\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n<trk>\n",
     );
     if let Some(name) = name {
         let escaped = name.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");

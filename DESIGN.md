@@ -1,10 +1,10 @@
-# Carputer, reimagined
+# CarChomp: the carputer, reimagined
 
 Source of truth for requirements: [stakeholder.md](stakeholder.md).
 
 ## Principles
 
-1. **One daemon, one database, one UI.** A single Rust binary (`carputerd`) plus
+1. **One daemon, one database, one UI.** A single Rust binary (`carchompd`) plus
    PostgreSQL/PostGIS. No per-team services, no second API, no logic in stored
    procedures.
 2. **Everything is an observation from a source.** GPS is just the first
@@ -27,9 +27,9 @@ Source of truth for requirements: [stakeholder.md](stakeholder.md).
                                        REST (axum) ◄──► PostgreSQL
 ```
 
-- `carputer-core` — no I/O, no async. gpsd JSON types, KISS framing, APRS
+- `carchomp-core` — no I/O, no async. gpsd JSON types, KISS framing, APRS
   position parsing, the smart-beaconing filter, the `Observation` type.
-- `carputerd` — tokio + axum + sqlx. Source tasks, bus, recorder, HTTP/WS,
+- `carchompd` — tokio + axum + sqlx. Source tasks, bus, recorder, HTTP/WS,
   static UI serving. Each source is a module enabled by config; a source that
   fails to connect retries forever and never takes the daemon down.
 - `ui/` — one Svelte app; kiosk and remote are layouts, not separate projects.

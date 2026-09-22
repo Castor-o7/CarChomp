@@ -1,13 +1,13 @@
 # Every key is optional; these are the defaults unless noted.
 # The DATABASE_URL environment variable overrides database_url.
 
-database_url = "postgres://carputer@localhost/carputer"
+database_url = "postgres://carchomp@localhost/carchomp"
 listen = "0.0.0.0:8000"
-# ui_dir = "/usr/share/carputer/ui"
+# ui_dir = "/usr/share/carchomp/ui"
 
 # Offline maps: *.pmtiles regions, plus assets/ (fonts, sprites; see
 # tools/fetch_map_assets.sh). Downloading regions needs the `pmtiles` CLI.
-maps_dir = "/var/lib/carputer/maps"
+maps_dir = "/var/lib/carchomp/maps"
 # map_source = "https://build.protomaps.com/20260917.pmtiles"  # default: latest build
 
 # Sources. Remove a line to disable that source.

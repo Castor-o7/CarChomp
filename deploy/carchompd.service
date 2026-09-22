@@ -1,11 +1,11 @@
 [Unit]
-Description=Carputer daemon
+Description=CarChomp daemon
 After=postgresql.service gpsd.service network.target
 Wants=postgresql.service
 
 [Service]
-User=carputer
-ExecStart=/usr/local/bin/carputerd /etc/carputer/carputerd.toml
+User=carchomp
+ExecStart=/usr/local/bin/carchompd /etc/carchomp/carchompd.toml
 Restart=always
 RestartSec=2
 # Port 80 without root.
@@ -14,7 +14,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/carputer
+ReadWritePaths=/var/lib/carchomp
 
 [Install]
 WantedBy=multi-user.target

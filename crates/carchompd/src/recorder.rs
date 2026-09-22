@@ -4,7 +4,7 @@
 //! segments so later drives can ask "have I been here?".
 
 use crate::{Bus, Config, Event, Status};
-use carputer_core::{
+use carchomp_core::{
     Fix, Observation, aprs,
     beacon::{Params, SmartBeacon},
 };

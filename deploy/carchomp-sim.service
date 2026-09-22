@@ -1,0 +1,11 @@
+[Unit]
+Description=CarChomp sensor simulator (pretend gpsd and APRS TNC)
+Before=carchompd.service
+
+[Service]
+DynamicUser=yes
+ExecStart=/usr/local/bin/carchomp-sim --gpsd 12947 --kiss 18001
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

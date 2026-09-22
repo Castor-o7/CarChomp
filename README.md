@@ -7,8 +7,8 @@ on a road you've never driven. A from-scratch take on the carputer capstone,
 built from the stakeholder's original directive ([stakeholder.md](stakeholder.md)). Design and roadmap:
 [DESIGN.md](DESIGN.md).
 
-    crates/carputer-core   pure logic: gpsd, SmartBeaconing, KISS, APRS  (no I/O)
-    crates/carputerd       the daemon: sources -> bus -> PostGIS, /ws, /api
+    crates/carchomp-core   pure logic: gpsd, SmartBeaconing, KISS, APRS  (no I/O)
+    crates/carchompd       the daemon: sources -> bus -> PostGIS, /ws, /api
     ui                     one Svelte + MapLibre app for the touchscreen and the browser
     deploy                 install script, systemd unit, production config
     tools/sim.py           stand-in for the sensors: pretend gpsd + APRS TNC
@@ -20,12 +20,12 @@ built from the stakeholder's original directive ([stakeholder.md](stakeholder.md
     (cd ui && npm install && npm run build)              # UI -> ui/dist
     python3 tools/sim.py --gpsd 12947 --kiss 18001 &     # pretend GPS + APRS radio
     cat > dev.toml <<'END'
-    database_url = "postgres://carputer:carputer@localhost:5433/carputer"
+    database_url = "postgres://carchomp:carchomp@localhost:5433/carchomp"
     gpsd = "127.0.0.1:12947"
     aprs_kiss = "127.0.0.1:18001"
     ui_dir = "ui/dist"
     END
-    cargo run -p carputerd -- dev.toml                   # then open http://localhost:8000
+    cargo run -p carchompd -- dev.toml                   # then open http://localhost:8000
 
 The simulator drives a city block, parks, and drives it again with a detour,
 forever: the badge goes *New road*, then *Been here* / *New road* on the
@@ -45,16 +45,16 @@ in `ui/` proxies to the daemon with hot reload. The API by hand:
 
 On Raspberry Pi OS or Debian (bookworm or newer), from a checkout:
 
-    sudo deploy/install.sh --kiosk pi --hotspot carputer 'a passphrase'
+    sudo deploy/install.sh --kiosk pi --hotspot carchomp 'a passphrase'
 
 All options are optional. It installs PostgreSQL/PostGIS, gpsd, the `pmtiles`
-tool, builds `carputerd` and the UI if the bundle has no prebuilt ones, creates
-the database, and starts `carputerd.service` on port 80. Run it again to
-upgrade; data and `/etc/carputer/carputerd.toml` are kept.
+tool, builds `carchompd` and the UI if the bundle has no prebuilt ones, creates
+the database, and starts `carchompd.service` on port 80. Run it again to
+upgrade; data and `/etc/carchomp/carchompd.toml` are kept.
 
 ### On a reTerminal, before the GPS and radio arrive
 
-    sudo deploy/install.sh --kiosk pi --hotspot carputer 'a passphrase' --demo
+    sudo deploy/install.sh --kiosk pi --hotspot carchomp 'a passphrase' --demo
 
 `--demo` runs `tools/sim.py` as a service in place of the sensors; everything
 else is the real thing, on the real device: PostgreSQL on the CM4, the

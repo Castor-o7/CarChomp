@@ -1,6 +1,6 @@
 #!/bin/sh
 # Fetch the fonts and sprites the offline vector map needs for labels and
-# icons. Run once, online: fetch_map_assets.sh /var/lib/carputer/maps
+# icons. Run once, online: fetch_map_assets.sh /var/lib/carchomp/maps
 set -eu
 maps_dir=${1:?usage: $0 <maps_dir>}
 tmp=$(mktemp -d)

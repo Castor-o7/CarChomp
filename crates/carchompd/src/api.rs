@@ -13,7 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
-use carputer_core::{Fix, interchange};
+use carchomp_core::{Fix, interchange};
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::path::PathBuf;

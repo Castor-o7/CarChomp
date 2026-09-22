@@ -5,7 +5,7 @@ mod sources;
 mod system;
 mod wifi;
 
-use carputer_core::{Observation, beacon};
+use carchomp_core::{Observation, beacon};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 use std::{net::SocketAddr, path::PathBuf};
@@ -59,10 +59,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            database_url: "postgres://carputer@localhost/carputer".into(),
+            database_url: "postgres://carchomp@localhost/carchomp".into(),
             listen: ([0, 0, 0, 0], 8000).into(),
             ui_dir: None,
-            maps_dir: "/var/lib/carputer/maps".into(),
+            maps_dir: "/var/lib/carchomp/maps".into(),
             map_source: None,
             gpsd: Some("127.0.0.1:2947".into()),
             aprs_kiss: None,
@@ -78,7 +78,7 @@ impl Default for Config {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    // usage: carputerd [config.toml]; DATABASE_URL overrides the file.
+    // usage: carchompd [config.toml]; DATABASE_URL overrides the file.
     let mut config: Config = match std::env::args().nth(1) {
         Some(path) => toml::from_str(&std::fs::read_to_string(path)?)?,
         None => Config::default(),

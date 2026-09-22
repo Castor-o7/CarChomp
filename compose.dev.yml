@@ -1,15 +1,15 @@
 # Development database only. On the Pi, PostgreSQL + PostGIS are installed
-# natively and carputerd runs as a systemd unit; no containers.
+# natively and carchompd runs as a systemd unit; no containers.
 services:
   db:
     image: imresamu/postgis:17-3.5-bookworm # multi-arch (arm64 + amd64)
     environment:
-      POSTGRES_USER: carputer
-      POSTGRES_PASSWORD: carputer
-      POSTGRES_DB: carputer
+      POSTGRES_USER: carchomp
+      POSTGRES_PASSWORD: carchomp
+      POSTGRES_DB: carchomp
     ports:
       - "5433:5432" # 5432 is often taken by a local PostgreSQL
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U carputer"]
+      test: ["CMD-SHELL", "pg_isready -U carchomp"]
       interval: 2s
       retries: 30

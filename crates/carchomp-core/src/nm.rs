@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn saved_profiles_are_wifi_only() {
-        let out = "home:802-11-wireless\nWired connection 1:802-3-ethernet\ncarputer-hotspot:802-11-wireless\n";
-        assert_eq!(saved_wifi(out), ["home", "carputer-hotspot"]);
+        let out = "home:802-11-wireless\nWired connection 1:802-3-ethernet\ncarchomp-hotspot:802-11-wireless\n";
+        assert_eq!(saved_wifi(out), ["home", "carchomp-hotspot"]);
     }
 }

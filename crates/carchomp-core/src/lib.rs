@@ -1,4 +1,4 @@
-//! I/O-free carputer logic. Everything here is synchronous and testable
+//! I/O-free carchomp logic. Everything here is synchronous and testable
 //! without hardware, a database, or a network.
 
 pub mod aprs;

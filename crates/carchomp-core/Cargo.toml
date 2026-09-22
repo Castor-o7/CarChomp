@@ -1,10 +1,10 @@
 [package]
-name = "carputer-core"
+name = "carchomp-core"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "I/O-free carputer logic: observations, gpsd, smart beaconing, KISS, APRS"
+description = "I/O-free carchomp logic: observations, gpsd, smart beaconing, KISS, APRS"
 
 [dependencies]
 roxmltree = "0.20"

@@ -3,7 +3,7 @@
 
 It drives a route over and over, parking in between so tracks end, and plays
 a small APRS scene around the route's start: a moving car, a weather station,
-a road closure that is later lifted, a brush fire, and bulletins. carputerd
+a road closure that is later lifted, a brush fire, and bulletins. carchompd
 cannot tell the difference, so everything downstream of the sensors can be
 developed and demonstrated without them.
 
@@ -20,7 +20,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 
 EARTH = 111_320  # metres per degree of latitude
-PARK = 400  # seconds parked between drives; longer than carputerd's track_idle
+PARK = 400  # seconds parked between drives; longer than carchompd's track_idle
 CRUISE = 13.0  # m/s, for GPX files without timestamps
 
 
@@ -91,7 +91,7 @@ class Gps:
     def serve(self, conn):
         with conn, conn.makefile("rw") as f:
             f.readline()  # ?WATCH=...
-            f.write('{"class":"VERSION","release":"carputer-sim"}\n')
+            f.write('{"class":"VERSION","release":"carchomp-sim"}\n')
             self.listener.set()
             while not self.done:
                 with self.tick:
@@ -176,5 +176,5 @@ if __name__ == "__main__":
     start = next(route())
     listen(args.gpsd, gps.serve)
     listen(args.kiss, lambda conn: serve_kiss(conn, start, 10 / args.speedup, gps))
-    print(f"carputer-sim: gpsd on :{args.gpsd}, KISS on :{args.kiss}, {args.speedup:g}x", flush=True)
+    print(f"carchomp-sim: gpsd on :{args.gpsd}, KISS on :{args.kiss}, {args.speedup:g}x", flush=True)
     gps.run()

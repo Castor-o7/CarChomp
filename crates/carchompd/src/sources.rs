@@ -3,7 +3,7 @@
 //! A new kind of source is one more function here.
 
 use crate::{Bus, Event};
-use carputer_core::{Observation, aprs, gpsd, kiss};
+use carchomp_core::{Observation, aprs, gpsd, kiss};
 use std::{io, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},

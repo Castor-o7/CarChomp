@@ -1,13 +1,13 @@
 [package]
-name = "carputerd"
+name = "carchompd"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "The carputer daemon: sources -> bus -> PostgreSQL, WebSocket, REST"
+description = "The carchomp daemon: sources -> bus -> PostgreSQL, WebSocket, REST"
 
 [dependencies]
-carputer-core = { path = "../carputer-core" }
+carchomp-core = { path = "../carchomp-core" }
 anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 rustix = { version = "1", features = ["fs"] }
