@@ -3,6 +3,7 @@
 
 pub mod aprs;
 pub mod beacon;
+pub mod eapconfig;
 pub mod gpsd;
 pub mod interchange;
 pub mod kiss;
