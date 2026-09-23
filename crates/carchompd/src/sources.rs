@@ -11,6 +11,18 @@ use tokio::{
 };
 
 const RETRY: Duration = Duration::from_secs(5);
+/// A peer that vanished without closing the connection (power cut, Wi-Fi
+/// drop) is only noticed by its silence. gpsd reports every second while it
+/// has a receiver; a TNC can be quiet for minutes on an empty channel.
+const GPSD_SILENCE: Duration = Duration::from_secs(60);
+const KISS_SILENCE: Duration = Duration::from_secs(15 * 60);
+
+/// Read with a deadline; silence past it ends the session like an error.
+async fn within<T>(limit: Duration, read: impl Future<Output = io::Result<T>>) -> io::Result<T> {
+    tokio::time::timeout(limit, read)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, format!("nothing heard for {} s", limit.as_secs())))?
+}
 
 pub async fn gpsd(addr: String, source: i16, bus: Bus) {
     loop {
@@ -28,7 +40,7 @@ async fn gpsd_session(addr: &str, source: i16, bus: &Bus) -> io::Result<()> {
     let mut stream = BufReader::new(TcpStream::connect(addr).await?);
     stream.get_mut().write_all(gpsd::WATCH.as_bytes()).await?;
     let mut lines = stream.lines();
-    while let Some(line) = lines.next_line().await? {
+    while let Some(line) = within(GPSD_SILENCE, lines.next_line()).await? {
         if let Some(fix) = gpsd::parse_fix(&line) {
             publish(bus, source, Observation::Fix(fix));
         }
@@ -41,7 +53,7 @@ async fn aprs_kiss_session(addr: &str, source: i16, bus: &Bus) -> io::Result<()>
     let mut decoder = kiss::Decoder::default();
     let mut buf = [0u8; 1024];
     loop {
-        let n = stream.read(&mut buf).await?;
+        let n = within(KISS_SILENCE, stream.read(&mut buf)).await?;
         if n == 0 {
             return Ok(());
         }
@@ -65,4 +77,16 @@ async fn retry(name: &str, addr: &str, ended: io::Result<()>) {
         Err(e) => tracing::warn!("{name}: {addr}: {e}"),
     }
     tokio::time::sleep(RETRY).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn silence_is_an_error() {
+        let err = within(Duration::from_millis(10), std::future::pending::<io::Result<()>>()).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(within(Duration::from_secs(1), async { Ok(7) }).await.unwrap(), 7);
+    }
 }
