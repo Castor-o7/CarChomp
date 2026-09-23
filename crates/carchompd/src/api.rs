@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{
-        Path, Query, Request, State, WebSocketUpgrade,
+        ConnectInfo, Path, Query, Request, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{StatusCode, header},
@@ -15,11 +15,15 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{any, get, post},
 };
-use carchomp_core::{Fix, interchange};
+use carchomp_core::{
+    Fix, interchange,
+    beacon::{Params, SmartBeacon},
+};
 use serde::Deserialize;
 use sqlx::PgPool;
 use std::{
     collections::{HashMap, HashSet},
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::Arc,
 };
@@ -36,10 +40,21 @@ struct App {
     data_dir: PathBuf,
     /// One import at a time: each can hold a large body and many rows.
     importing: Arc<Semaphore>,
+    /// WebSocket clients at once; each holds a socket and a task.
+    clients: Arc<Semaphore>,
+    /// Imports are thinned the way live fixes are.
+    beacon: Params,
 }
 
 const IMPORT_LIMIT: usize = 16 << 20;
 const IMPORT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+const MAX_CLIENTS: usize = 32;
+/// Clients only ever close or answer pings; nothing they send is read.
+const WS_MESSAGE_LIMIT: usize = 4096;
+/// `near` radius cap, metres: enough for any "nearby", small enough for the index.
+const MAX_NEAR: f64 = 50_000.0;
+/// `minutes` cap: about ten years.
+const MAX_MINUTES: f64 = 5_256_000.0;
 
 pub fn router(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Config) -> Router {
     let router = Router::new()
@@ -47,6 +62,7 @@ pub fn router(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Conf
         .route("/api/health", get(health))
         .route("/api/tracks", get(list_tracks))
         .route("/api/tracks/import", post(import_tracks))
+        .route("/api/tracks/export.gpx", get(export_tracks))
         .route("/api/tracks/{id}", get(get_track).patch(patch_track).delete(delete_track))
         .route("/api/tracks/{id}/gpx", get(get_track_gpx))
         .route("/api/segments", get(segments))
@@ -55,7 +71,15 @@ pub fn router(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Conf
         // Without this, a mistyped API path would be answered with the UI.
         .route("/api/{*unknown}", any(|| async { StatusCode::NOT_FOUND }))
         .route_layer(middleware::from_fn(same_origin))
-        .with_state(App { db, bus, status, data_dir: config.maps_dir.clone(), importing: Arc::new(Semaphore::new(1)) });
+        .with_state(App {
+            db,
+            bus,
+            status,
+            data_dir: config.maps_dir.clone(),
+            importing: Arc::new(Semaphore::new(1)),
+            clients: Arc::new(Semaphore::new(MAX_CLIENTS)),
+            beacon: config.beacon,
+        });
     match config.ui_dir.clone() {
         Some(dir) => {
             let index = ServeFile::new(dir.join("index.html"));
@@ -77,6 +101,11 @@ impl IntoResponse for Error {
     fn into_response(self) -> Response {
         match self.0 {
             sqlx::Error::RowNotFound => StatusCode::NOT_FOUND.into_response(),
+            // SQLSTATE class 22, data exception: the client's input was bad.
+            sqlx::Error::Database(e) if e.code().is_some_and(|c| c.starts_with("22")) => {
+                tracing::warn!("api: {e}");
+                StatusCode::BAD_REQUEST.into_response()
+            }
             e => {
                 tracing::error!("api: {e}");
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -122,6 +151,73 @@ fn trusted(host: Option<&str>, origin: Option<&str>) -> bool {
     local && same
 }
 
+/// A network in CIDR notation; a bare address is a network of one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Net {
+    addr: IpAddr,
+    prefix: u8,
+}
+
+impl Net {
+    fn parse(s: &str) -> Option<Net> {
+        let (addr, prefix) = match s.trim().split_once('/') {
+            Some((addr, prefix)) => (addr.parse::<IpAddr>().ok()?, Some(prefix.parse::<u8>().ok()?)),
+            None => (s.trim().parse::<IpAddr>().ok()?, None),
+        };
+        let max = if addr.is_ipv4() { 32 } else { 128 };
+        let prefix = prefix.unwrap_or(max);
+        if prefix > max {
+            return None;
+        }
+        // Peers are compared unmapped, so ::ffff:a.b.c.d/n is a.b.c.d/(n - 96).
+        match addr.to_canonical() {
+            IpAddr::V4(v4) if addr.is_ipv6() => Some(Net { addr: v4.into(), prefix: prefix.checked_sub(96)? }),
+            addr => Some(Net { addr, prefix }),
+        }
+    }
+
+    fn contains(&self, ip: IpAddr) -> bool {
+        // Keep the top `prefix` bits of a `bits`-wide address.
+        let top = |bits: u32, x: u128| if self.prefix == 0 { 0 } else { x >> (bits - u32::from(self.prefix)) };
+        match (self.addr, ip.to_canonical()) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => top(32, u32::from(net).into()) == top(32, u32::from(ip).into()),
+            (IpAddr::V6(net), IpAddr::V6(ip)) => top(128, net.into()) == top(128, ip.into()),
+            _ => false,
+        }
+    }
+}
+
+/// Parse `trusted_networks`, naming the first entry that is not a network.
+pub fn networks(list: &[String]) -> Result<Vec<Net>, String> {
+    list.iter()
+        .map(|s| Net::parse(s).ok_or_else(|| format!("trusted_networks: {s:?} is not an address or CIDR network")))
+        .collect()
+}
+
+/// Loopback always, otherwise only the listed networks. IPv4 peers on a
+/// dual-stack socket arrive as ::ffff:a.b.c.d, which counts as a.b.c.d.
+fn peer_allowed(networks: &[Net], peer: IpAddr) -> bool {
+    let peer = peer.to_canonical();
+    peer.is_loopback() || networks.iter().any(|n| n.contains(peer))
+}
+
+/// Serves the car's own hotspot and the device itself, and nobody else:
+/// everything here, the car's position included, is unauthenticated.
+pub async fn trusted_peer(
+    State(networks): State<Arc<Vec<Net>>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if peer_allowed(&networks, peer.ip()) {
+        return next.run(req).await;
+    }
+    let body = "This CarChomp only serves its own hotspot and the device itself.\n\
+                To allow another network, add it (for example \"192.168.1.0/24\") to trusted_networks\n\
+                in /etc/carchomp/carchompd.toml and restart carchompd.\n";
+    (StatusCode::FORBIDDEN, body).into_response()
+}
+
 /// Run a query that returns a single JSON text value and pass it through.
 async fn json(query: sqlx::query::QueryScalar<'_, sqlx::Postgres, String, sqlx::postgres::PgArguments>, db: &PgPool) -> Result<Response, Error> {
     let body = query.fetch_one(db).await?;
@@ -129,7 +225,16 @@ async fn json(query: sqlx::query::QueryScalar<'_, sqlx::Postgres, String, sqlx::
 }
 
 async fn ws(State(app): State<App>, upgrade: WebSocketUpgrade) -> Response {
-    upgrade.on_upgrade(|socket| live(socket, app))
+    let Ok(permit) = app.clients.clone().try_acquire_owned() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "too many live clients").into_response();
+    };
+    upgrade
+        .max_message_size(WS_MESSAGE_LIMIT)
+        .max_frame_size(WS_MESSAGE_LIMIT)
+        .on_upgrade(|socket| async move {
+            live(socket, app).await;
+            drop(permit);
+        })
 }
 
 /// Messages are either `{"status": {...}}` or `{"source": n, "obs": {...}}`.
@@ -149,7 +254,7 @@ async fn live(mut socket: WebSocket, app: App) {
             }
             // Clients have nothing to say; this only notices them leaving.
             msg = socket.recv() => match msg {
-                Some(Ok(_)) => continue,
+                Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,
                 _ => return,
             },
         };
@@ -172,12 +277,18 @@ async fn health(State(app): State<App>) -> Result<Response, Error> {
             'aprs_stations', (SELECT count(DISTINCT callsign) FROM aprs_packet WHERE time > now() - interval '1 day'),
             'database_bytes', pg_database_size(current_database()))::text",
     )
-    .bind(env!("CARGO_PKG_VERSION"));
+    .bind(VERSION);
     let body: String = q.fetch_one(&app.db).await?;
     let mut health: serde_json::Value = serde_json::from_str(&body).expect("PostgreSQL writes valid JSON");
     health["system"] = system::snapshot(&app.data_dir);
     Ok(Json(health).into_response())
 }
+
+/// The release this daemon was built from (see tools/bundle.sh), else the crate version.
+pub const VERSION: &str = match option_env!("CARCHOMP_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
 
 #[derive(Deserialize)]
 struct Near {
@@ -187,8 +298,10 @@ struct Near {
 
 async fn list_tracks(State(app): State<App>, Query(q): Query<Near>) -> Result<Response, Error> {
     let (lon, lat, r) = match q.near.as_deref().map(floats) {
-        Some(Some([lon, lat, r])) => (Some(lon), Some(lat), Some(r)),
-        Some(None) => return Ok(StatusCode::BAD_REQUEST.into_response()),
+        Some(Some([lon, lat, r])) if (-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat) && r >= 0.0 => {
+            (Some(lon), Some(lat), Some(r.min(MAX_NEAR)))
+        }
+        Some(_) => return Ok(StatusCode::BAD_REQUEST.into_response()),
         None => (None, None, None),
     };
     let q = sqlx::query_scalar(
@@ -280,6 +393,11 @@ async fn import_tracks(State(app): State<App>, body: Body) -> Result<Response, E
                 })
                 .collect();
             distinct_times(&mut fixes);
+            // Stored the way a live drive is. Without times there is no
+            // speed to beacon by, so an untimed track (a planned route) is kept whole.
+            if timed {
+                fixes = thin(fixes, app.beacon);
+            }
             let id: i64 = sqlx::query_scalar("INSERT INTO track (name, started) VALUES ($1, $2) RETURNING id")
                 .bind(&track.name)
                 .bind(fixes[0].time)
@@ -325,6 +443,80 @@ fn distinct_times(fixes: &mut [Fix]) {
     }
 }
 
+/// What smart beaconing would have stored of a recorded track, plus always
+/// its last point. Imported points carry no speed or course, so the beacon
+/// is fed ones derived from each point and the one before it (the first
+/// point: the one after it); the fixes kept are returned as they came.
+/// Times must be distinct.
+fn thin(fixes: Vec<Fix>, params: Params) -> Vec<Fix> {
+    let mut beacon = SmartBeacon::new(params);
+    let mut kept = HashSet::new();
+    for (i, fix) in fixes.iter().enumerate() {
+        let mut fed = fix.clone();
+        let pair = if i == 0 { fixes.get(..2) } else { fixes.get(i - 1..=i) };
+        if let Some([prev, fix]) = pair {
+            let seconds = (fix.time - prev.time).as_seconds_f64();
+            fed.speed = fed.speed.or((seconds > 0.0).then(|| distance(prev, fix) / seconds));
+            fed.course = fed.course.or(Some(bearing(prev, fix)));
+        }
+        kept.extend(beacon.push(&fed).into_iter().map(|f| f.time));
+    }
+    kept.extend(fixes.last().map(|f| f.time));
+    fixes.into_iter().filter(|f| kept.contains(&f.time)).collect()
+}
+
+/// Great-circle distance in metres.
+fn distance(a: &Fix, b: &Fix) -> f64 {
+    let (p1, p2) = (a.lat.to_radians(), b.lat.to_radians());
+    let h = ((p2 - p1) / 2.0).sin().powi(2) + p1.cos() * p2.cos() * ((b.lon - a.lon).to_radians() / 2.0).sin().powi(2);
+    2.0 * 6_371_008.8 * h.sqrt().min(1.0).asin()
+}
+
+/// Initial bearing from `a` to `b`, degrees true, 0..360.
+fn bearing(a: &Fix, b: &Fix) -> f64 {
+    let (p1, p2, dl) = (a.lat.to_radians(), b.lat.to_radians(), (b.lon - a.lon).to_radians());
+    let y = dl.sin() * p2.cos();
+    let x = p1.cos() * p2.sin() - p1.sin() * p2.cos() * dl.cos();
+    y.atan2(x).to_degrees().rem_euclid(360.0)
+}
+
+/// Every visible track, each its own <trk>, in one GPX file.
+async fn export_tracks(State(app): State<App>) -> Result<Response, Error> {
+    let tracks: Vec<(i64, Option<String>)> =
+        sqlx::query_as("SELECT id, name FROM track WHERE visible ORDER BY started").fetch_all(&app.db).await?;
+    let mut all = Vec::new();
+    for (id, name) in tracks {
+        let rows: Vec<(OffsetDateTime, f64, f64, Option<f32>)> =
+            sqlx::query_as("SELECT time, ST_X(geom), ST_Y(geom), alt FROM fix WHERE track_id = $1 ORDER BY time")
+                .bind(id)
+                .fetch_all(&app.db)
+                .await?;
+        let points = rows
+            .into_iter()
+            .map(|(time, lon, lat, ele)| interchange::Point { lon, lat, ele: ele.map(f64::from), time: Some(time) })
+            .collect();
+        all.push((name, points));
+    }
+    let headers = [
+        (header::CONTENT_TYPE, "application/gpx+xml"),
+        (header::CONTENT_DISPOSITION, "attachment; filename=\"carchomp-tracks.gpx\""),
+    ];
+    Ok((headers, gpx_all(&all)).into_response())
+}
+
+/// One GPX document holding each track's <trk> as `to_gpx` writes it.
+fn gpx_all(tracks: &[(Option<String>, Vec<interchange::Point>)]) -> String {
+    let one = interchange::to_gpx(None, &[]);
+    let (head, tail) = (&one[..one.find("<trk>").expect("to_gpx writes a trk")], "</gpx>\n");
+    let mut gpx = head.to_owned();
+    for (name, points) in tracks {
+        let doc = interchange::to_gpx(name.as_deref(), points);
+        let (start, end) = (doc.find("<trk>").expect("a trk"), doc.rfind("</trk>").expect("a trk") + "</trk>\n".len());
+        gpx += &doc[start..end];
+    }
+    gpx + tail
+}
+
 #[derive(Deserialize)]
 struct Viewport {
     /// `west,south,east,north`
@@ -356,7 +548,7 @@ async fn segments(State(app): State<App>, Query(q): Query<Viewport>) -> Result<R
 
 /// Parse exactly `N` comma-separated numbers.
 fn floats<const N: usize>(s: &str) -> Option<[f64; N]> {
-    let v: Vec<f64> = s.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>().ok()?;
+    let v: Vec<f64> = s.split(',').map(|x| x.trim().parse::<f64>().ok().filter(|v| v.is_finite())).collect::<Option<_>>()?;
     v.try_into().ok()
 }
 
@@ -398,8 +590,17 @@ struct Since {
     minutes: Option<f64>,
 }
 
+/// `minutes`, or the default when absent; `None` if it is not a sane span.
+fn minutes(given: Option<f64>, default: f64) -> Option<f64> {
+    let m = given.unwrap_or(default);
+    (m.is_finite() && (0.0..=MAX_MINUTES).contains(&m)).then_some(m)
+}
+
 /// Stations and objects on the map, as a GeoJSON FeatureCollection. Default: the last hour.
 async fn aprs_stations(State(app): State<App>, Query(q): Query<Since>) -> Result<Response, Error> {
+    let Some(minutes) = minutes(q.minutes, 60.0) else {
+        return Ok(StatusCode::BAD_REQUEST.into_response());
+    };
     let q = sqlx::query_scalar(
         "SELECT json_build_object('type', 'FeatureCollection', 'features', coalesce(json_agg(json_build_object(
             'type', 'Feature',
@@ -410,18 +611,21 @@ async fn aprs_stations(State(app): State<App>, Query(q): Query<Since>) -> Result
          FROM aprs_station
          WHERE time > now() - make_interval(secs => $1 * 60)",
     )
-    .bind(q.minutes.unwrap_or(60.0));
+    .bind(minutes);
     json(q, &app.db).await
 }
 
 /// Bulletins and weather-service alerts, newest first. Default: the last day.
 async fn aprs_bulletins(State(app): State<App>, Query(q): Query<Since>) -> Result<Response, Error> {
+    let Some(minutes) = minutes(q.minutes, 1440.0) else {
+        return Ok(StatusCode::BAD_REQUEST.into_response());
+    };
     let q = sqlx::query_scalar(
         "SELECT coalesce(json_agg(b ORDER BY b.time DESC), '[]')::text
          FROM aprs_bulletin b
          WHERE time > now() - make_interval(secs => $1 * 60)",
     )
-    .bind(q.minutes.unwrap_or(1440.0));
+    .bind(minutes);
     json(q, &app.db).await
 }
 
@@ -444,6 +648,132 @@ mod tests {
         assert!(!trusted(Some("192.168.4.1"), Some("https://evil.example.com")));
         assert!(!trusted(Some("localhost:8000"), Some("http://localhost:5173")));
         assert!(!trusted(Some("localhost"), Some("null")));
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn cidr_parsing() {
+        assert_eq!(Net::parse("10.42.0.0/24"), Some(Net { addr: ip("10.42.0.0"), prefix: 24 }));
+        assert_eq!(Net::parse(" 192.168.1.5 "), Some(Net { addr: ip("192.168.1.5"), prefix: 32 }));
+        assert_eq!(Net::parse("fd00::/8"), Some(Net { addr: ip("fd00::"), prefix: 8 }));
+ assert_eq!(Net::parse("::ffff:10.0.0.0/104"), Some(Net { addr: ip("10.0.0.0"), prefix: 8 }));
+        for bad in ["::ffff:10.0.0.0/64", "", "10.42.0.0/33", "fd00::/129", "10.42.0/24", "10.42.0.0/", "/24", "10.42.0.0/-1", "host.local/24"] {
+            assert_eq!(Net::parse(bad), None, "{bad}");
+        }
+        assert!(networks(&["10.42.0.0/24".into(), "fd00::/8".into()]).is_ok());
+        assert!(networks(&["10.42.0.0/24".into(), "nope".into()]).unwrap_err().contains("\"nope\""));
+    }
+
+    #[test]
+    fn cidr_matching() {
+        let hotspot = Net::parse("10.42.0.0/24").unwrap();
+        assert!(hotspot.contains(ip("10.42.0.1")));
+        assert!(hotspot.contains(ip("10.42.0.255")));
+        assert!(!hotspot.contains(ip("10.42.1.1")));
+        assert!(!hotspot.contains(ip("10.43.0.1")));
+        assert!(hotspot.contains(ip("::ffff:10.42.0.7")), "IPv4-mapped peers are unmapped");
+        assert!(!hotspot.contains(ip("fd00::1")));
+        let odd = Net::parse("192.168.4.128/25").unwrap();
+        assert!(odd.contains(ip("192.168.4.200")) && !odd.contains(ip("192.168.4.127")));
+        assert!(Net::parse("0.0.0.0/0").unwrap().contains(ip("8.8.8.8")));
+        assert!(!Net::parse("0.0.0.0/0").unwrap().contains(ip("2001:db8::1")));
+        assert!(Net::parse("::/0").unwrap().contains(ip("2001:db8::1")));
+        let v6 = Net::parse("2001:db8:1::/48").unwrap();
+        assert!(v6.contains(ip("2001:db8:1:ffff::1")) && !v6.contains(ip("2001:db8:2::1")));
+        assert!(Net::parse("10.42.0.9").unwrap().contains(ip("10.42.0.9")));
+        assert!(!Net::parse("10.42.0.9").unwrap().contains(ip("10.42.0.10")));
+    }
+
+    #[test]
+    fn loopback_is_always_allowed() {
+        let hotspot = networks(&["10.42.0.0/24".into()]).unwrap();
+        for peer in ["127.0.0.1", "127.8.9.10", "::1", "::ffff:127.0.0.1", "10.42.0.23", "::ffff:10.42.0.23"] {
+            assert!(peer_allowed(&hotspot, ip(peer)), "{peer}");
+        }
+        for peer in ["192.168.1.20", "10.42.1.2", "fe80::1", "::ffff:192.168.1.20"] {
+            assert!(!peer_allowed(&hotspot, ip(peer)), "{peer}");
+        }
+        assert!(peer_allowed(&[], ip("::1")) && !peer_allowed(&[], ip("10.42.0.2")));
+    }
+
+    #[test]
+    fn floats_must_be_finite() {
+        assert_eq!(floats::<3>("-122.6, 45.5,200"), Some([-122.6, 45.5, 200.0]));
+        assert_eq!(floats::<3>("1,2"), None);
+        for bad in ["nan,1,2", "inf,1,2", "1,-infinity,2", "1,2,x"] {
+            assert_eq!(floats::<3>(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn minutes_are_sane_spans() {
+        assert_eq!(minutes(None, 60.0), Some(60.0));
+        assert_eq!(minutes(Some(0.0), 60.0), Some(0.0));
+        for bad in [f64::NAN, f64::INFINITY, -1.0, 1e12] {
+            assert_eq!(minutes(Some(bad), 60.0), None, "{bad}");
+        }
+    }
+
+    /// A 1 Hz drive east along the equator at `speed` m/s, `n` fixes.
+    fn drive(n: i64, speed: f64) -> Vec<Fix> {
+        let t = datetime!(2026-09-17 20:00 UTC);
+        (0..n)
+            .map(|i| Fix { lon: i as f64 * speed / 111_195.0, ..fix(t + Duration::seconds(i)) })
+            .collect()
+    }
+
+    #[test]
+    fn imports_are_thinned_like_live_drives() {
+        // 30 m/s is above high_speed: one fix per fast_rate (15 s), plus the last.
+        let kept: Vec<_> = thin(drive(61, 30.0), Params::default()).iter().map(|f| f.time.second()).collect();
+        assert_eq!(kept, [0, 15, 30, 45, 0]);
+        // What was kept is stored as it came: no derived speed or course.
+        assert!(thin(drive(5, 30.0), Params::default()).iter().all(|f| f.speed.is_none() && f.course.is_none()));
+    }
+
+    #[test]
+    fn imports_keep_their_corners() {
+        // East for 20 s, then north for 20 s: the bend survives thinning.
+        let mut fixes = drive(21, 20.0);
+        let corner = fixes[20].clone();
+        fixes.extend((1..=20).map(|i| Fix {
+            time: corner.time + Duration::seconds(i),
+            lat: i as f64 * 20.0 / 111_195.0,
+            ..corner.clone()
+        }));
+        let kept = thin(fixes, Params::default());
+        assert!(kept.iter().any(|f| f.time == corner.time), "the fix at the bend is kept");
+        assert!(kept.len() < 10, "{} kept", kept.len());
+    }
+
+    #[test]
+    fn distance_and_bearing() {
+        let t = datetime!(2026-09-17 20:00 UTC);
+        let a = fix(t);
+        let north = Fix { lat: 1.0, ..fix(t) };
+        let east = Fix { lon: 1.0, ..fix(t) };
+        assert!((distance(&a, &north) - 111_195.0).abs() < 1.0);
+        assert!((bearing(&a, &north) - 0.0).abs() < 1e-9);
+        assert!((bearing(&a, &east) - 90.0).abs() < 1e-9);
+        assert!((bearing(&east, &a) - 270.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn export_is_one_gpx_with_a_trk_per_track() {
+        let t = datetime!(2026-09-17 20:00 UTC);
+        let p = |lon: f64| interchange::Point { lon, lat: 45.0, ele: None, time: Some(t) };
+        let tracks = vec![(Some("Coast".to_owned()), vec![p(1.0), p(2.0)]), (None, vec![p(3.0), p(4.0)])];
+        let gpx = gpx_all(&tracks);
+        assert_eq!(gpx.matches("<gpx ").count(), 1);
+        assert_eq!(gpx.matches("<trk>").count(), 2);
+        let parsed = interchange::parse(&gpx).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name.as_deref(), Some("Coast"));
+        assert_eq!(parsed[1].points, tracks[1].1);
+        assert!(interchange::parse(&gpx_all(&[])).is_ok_and(|t| t.is_empty()));
     }
 
     fn fix(time: OffsetDateTime) -> Fix {

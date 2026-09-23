@@ -3,12 +3,13 @@ mod maps;
 mod recorder;
 mod sources;
 mod system;
+mod update;
 mod wifi;
 
 use carchomp_core::{Observation, beacon};
 use serde::{Deserialize, Serialize};
-use sqlx::postgres::PgPoolOptions;
-use std::{net::SocketAddr, path::PathBuf};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::sync::{broadcast, watch};
 
 /// What flows over the bus and out of the WebSocket: an observation and
@@ -54,6 +55,9 @@ pub struct Config {
     pub road_radius: f64,
     /// ...and runs within this many degrees of our heading, either direction.
     pub road_heading: f64,
+    /// Networks (CIDR) allowed to use the web UI and API, besides loopback,
+    /// which always is. The default is NetworkManager's hotspot subnet.
+    pub trusted_networks: Vec<String>,
 }
 
 impl Default for Config {
@@ -70,6 +74,7 @@ impl Default for Config {
             track_idle: 300.0,
             road_radius: 25.0,
             road_heading: 35.0,
+            trusted_networks: vec!["10.42.0.0/24".into()],
         }
     }
 }
@@ -87,29 +92,41 @@ async fn main() -> anyhow::Result<()> {
         config.database_url = url;
     }
 
-    let db = PgPoolOptions::new()
-        .max_connections(4)
+    let networks = api::networks(&config.trusted_networks).map_err(anyhow::Error::msg)?;
+
+    // The recorder gets connections of its own, so however slow the
+    // queries web clients ask for, they cannot hold up recording.
+    let recording = PgPoolOptions::new()
+        .max_connections(2)
         .connect(&config.database_url)
         .await?;
-    sqlx::migrate!().run(&db).await?;
+    sqlx::migrate!().run(&recording).await?;
+    let db = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(config.database_url.parse::<PgConnectOptions>()?.options([("statement_timeout", "10s")]))
+        .await?;
 
     let (bus, _) = broadcast::channel(256);
 
     if let Some(addr) = config.gpsd.clone() {
-        let source = recorder::source_id(&db, "gps", &addr).await?;
+        let source = recorder::source_id(&recording, "gps", &addr).await?;
         tokio::spawn(sources::gpsd(addr, source, bus.clone()));
     }
     if let Some(addr) = config.aprs_kiss.clone() {
-        let source = recorder::source_id(&db, "aprs", &addr).await?;
+        let source = recorder::source_id(&recording, "aprs", &addr).await?;
         tokio::spawn(sources::aprs_kiss(addr, source, bus.clone()));
     }
     let (status, _) = watch::channel(Status::default());
-    tokio::spawn(recorder::run(db.clone(), bus.clone(), status.clone(), &config));
+    tokio::spawn(recorder::run(recording, bus.clone(), status.clone(), &config));
 
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
     tracing::info!("listening on {}", config.listen);
-    let app = api::router(db, bus, status, &config).merge(maps::router(config.maps_dir, config.map_source)).merge(wifi::router());
-    axum::serve(listener, app)
+    let app = api::router(db, bus, status, &config)
+        .merge(maps::router(config.maps_dir, config.map_source))
+        .merge(wifi::router())
+        .merge(update::router())
+        .layer(axum::middleware::from_fn_with_state(Arc::new(networks), api::trusted_peer));
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
         })
