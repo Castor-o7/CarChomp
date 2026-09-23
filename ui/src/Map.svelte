@@ -109,19 +109,25 @@
     });
   });
 
-  // Fetches a padded box so small moves (Follow eases every fix) reuse it;
-  // only the newest request's answer is drawn.
+  // Fetches a padded box so small moves (Follow eases every fix) reuse it,
+  // or the one still on its way; an answer older than the one drawn is dropped.
   let fetched = null;
+  let pending = null;
   let requests = 0;
+  let drawn = 0;
+  const inside = (b, [w, s, e, n]) => b && w >= b[0] && s >= b[1] && e <= b[2] && n <= b[3];
   async function loadTracks(force) {
+    if (!force && (inside(fetched, ui.bounds) || inside(pending, ui.bounds))) return;
     const [w, s, e, n] = ui.bounds;
-    if (!force && fetched && w >= fetched[0] && s >= fetched[1] && e <= fetched[2] && n <= fetched[3]) return;
     const dx = (e - w) / 2;
     const dy = (n - s) / 2;
     const box = [w - dx, s - dy, e + dx, n + dy];
     const request = ++requests;
+    pending = box;
     const data = await api(`segments?bbox=${box.map((x) => x.toFixed(5))}`).catch(() => null);
-    if (request !== requests) return;
+    if (pending === box) pending = null;
+    if (request < drawn) return;
+    drawn = request;
     fetched = data && box;
     map.getSource('tracks')?.setData(data ?? EMPTY);
   }
