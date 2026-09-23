@@ -98,20 +98,21 @@ pub fn realm(identity: &str) -> Option<&str> {
 /// changed profile keeps nothing stale. Secrets are cleared: NetworkManager
 /// then asks for them and `--ask` answers from standard input.
 pub fn enterprise_settings(identity: &str, server: &Server) -> Vec<String> {
-    let (eap, phase2, anonymous, ca_cert, domains, client_cert) = match server {
+    let ((eap, phase2, phase2_eap), anonymous, ca_cert, domains, client_cert) = match server {
         Server::File { profile, ca_cert, client_cert } => {
-            let (eap, phase2) = match profile.method {
-                Method::Tls => ("tls", ""),
-                Method::Peap => ("peap", "mschapv2"),
-                Method::TtlsPap => ("ttls", "pap"),
-                Method::TtlsMschapv2 => ("ttls", "mschapv2"),
+            let method = match profile.method {
+                Method::Tls => ("tls", "", ""),
+                Method::Peap => ("peap", "mschapv2", ""),
+                Method::TtlsPap => ("ttls", "pap", ""),
+                Method::TtlsMschapv2 => ("ttls", "mschapv2", ""),
+                Method::TtlsEapMschapv2 => ("ttls", "", "mschapv2"),
             };
             let anonymous = profile.anonymous_identity.clone().unwrap_or_default();
-            (eap, phase2, anonymous, *ca_cert, profile.server_names.join(";"), client_cert.unwrap_or_default())
+            (method, anonymous, *ca_cert, profile.server_names.join(";"), client_cert.unwrap_or_default())
         }
         Server::Domain(domain) => {
             let anonymous = realm(identity).map(|realm| format!("anonymous@{realm}")).unwrap_or_default();
-            ("peap", "mschapv2", anonymous, "", domain.to_string(), "")
+            (("peap", "mschapv2", ""), anonymous, "", domain.to_string(), "")
         }
     };
     // The file's CA alone, or else the system's: never neither.
@@ -120,7 +121,7 @@ pub fn enterprise_settings(identity: &str, server: &Server) -> Vec<String> {
         ("wifi-sec.key-mgmt", "wpa-eap"),
         ("802-1x.eap", eap),
         ("802-1x.phase2-auth", phase2),
-        ("802-1x.phase2-autheap", ""),
+        ("802-1x.phase2-autheap", phase2_eap),
         ("802-1x.identity", identity),
         ("802-1x.anonymous-identity", &anonymous),
         ("802-1x.ca-cert", ca_cert),
@@ -233,10 +234,15 @@ mod tests {
         ] {
             assert_eq!(setting(&s, k), v, "{k}");
         }
-        for (method, eap, phase2) in [(Method::TtlsPap, "ttls", "pap"), (Method::TtlsMschapv2, "ttls", "mschapv2")] {
+        for (method, eap, phase2, phase2_eap) in [
+            (Method::TtlsPap, "ttls", "pap", ""),
+            (Method::TtlsMschapv2, "ttls", "mschapv2", ""),
+            (Method::TtlsEapMschapv2, "ttls", "", "mschapv2"),
+        ] {
             let p = file(method);
             let s = enterprise_settings("u", &Server::File { profile: &p, ca_cert: "/d/ca.pem", client_cert: None });
-            assert_eq!((setting(&s, "802-1x.eap"), setting(&s, "802-1x.phase2-auth")), (eap, phase2));
+            let got = (setting(&s, "802-1x.eap"), setting(&s, "802-1x.phase2-auth"), setting(&s, "802-1x.phase2-autheap"));
+            assert_eq!(got, (eap, phase2, phase2_eap), "{method:?}");
         }
         let tls = Profile { anonymous_identity: None, ..file(Method::Tls) };
         let s = enterprise_settings("dev@example.edu", &Server::File { profile: &tls, ca_cert: "/d/ca.pem", client_cert: Some("/d/client.p12") });

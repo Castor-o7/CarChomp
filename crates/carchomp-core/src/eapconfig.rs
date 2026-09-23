@@ -9,7 +9,10 @@ pub enum Method {
     Tls,
     Peap,
     TtlsPap,
+    /// TTLS with MSCHAPv2 as a plain inner method (non-EAP type 3)...
     TtlsMschapv2,
+    /// ...and wrapped in EAP (type 26): not the same on the wire.
+    TtlsEapMschapv2,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -114,7 +117,8 @@ fn supported(auth: Node) -> Option<Method> {
         (13, _, _) if client_cert(auth).is_some() => Some(Method::Tls),
         (25, Some(26), _) => Some(Method::Peap),
         (21, _, Some(1)) => Some(Method::TtlsPap),
-        (21, Some(26), _) | (21, _, Some(3)) => Some(Method::TtlsMschapv2),
+        (21, Some(26), _) => Some(Method::TtlsEapMschapv2),
+        (21, _, Some(3)) => Some(Method::TtlsMschapv2),
         _ => None,
     }
 }
@@ -302,7 +306,7 @@ mod tests {
         let mschap = ttls("<NonEAPAuthMethod><Type>3</Type></NonEAPAuthMethod>");
         assert_eq!(parse(&mschap).unwrap().method, Method::TtlsMschapv2);
         let eap_mschap = ttls("<EAPMethod><Type>26</Type></EAPMethod>");
-        assert_eq!(parse(&eap_mschap).unwrap().method, Method::TtlsMschapv2);
+        assert_eq!(parse(&eap_mschap).unwrap().method, Method::TtlsEapMschapv2);
         assert!(parse(&ttls("<NonEAPAuthMethod><Type>2</Type></NonEAPAuthMethod>")).is_err());
     }
 
