@@ -8,8 +8,11 @@
   let nearby = $state(false);
   let error = $state('');
 
+  const positioned = $derived(live.fix !== null);
+
   $effect(() => {
     ui.tracksChanged;
+    if (nearby && !positioned) return void (tracks = []);
     // Deliberately not reactive to every fix: "nearby" means near where we
     // were when the list was opened or last refreshed.
     const fix = nearby ? untrack(() => live.fix) : null;
@@ -49,11 +52,11 @@
       <button onclick={() => show(t)}>Show</button>
       <button class:on={t.visible} onclick={() => patch(t.id, { visible: !t.visible })}>On map</button>
       <a class="button" href="/api/tracks/{t.id}/gpx" download>GPX</a>
-      <button onclick={() => remove(t)}>Delete</button>
+      {#if t.ended}<button onclick={() => remove(t)}>Delete</button>{/if}
     </div>
   </section>
 {:else}
-  <p>No tracks {nearby ? 'near here' : 'yet'}.</p>
+  <p>{nearby && !positioned ? 'No position yet.' : `No tracks ${nearby ? 'near here' : 'yet'}.`}</p>
 {/each}
 
 <style>
