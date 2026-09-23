@@ -5,6 +5,8 @@
   let joining = $state(null); // the secured network being typed into
   let password = $state('');
   let identity = $state(''); // user name, for WPA-Enterprise networks
+  let profile = $state(null); // { name, text } of the chosen .eap-config file
+  let domain = $state(''); // RADIUS server domain, when there is no profile
   let busy = $state(false);
   let error = $state('');
 
@@ -18,18 +20,36 @@
   async function run(request) {
     busy = true;
     error = '';
-    await request.catch((e) => (error = e.message));
+    const ok = await request.then(() => true, (e) => ((error = e.message), false));
     busy = false;
-    joining = null;
-    password = '';
-    identity = '';
+    // On failure the form stays filled in, so a wrong domain or profile is a quick fix.
+    if (ok) {
+      joining = null;
+      password = identity = domain = '';
+      profile = null;
+    }
     await load();
   }
   const post = (body) => api('wifi', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
   function join(network) {
-    if (network.secure && !wifi.saved.includes(network.ssid)) joining = network.ssid;
-    else run(post({ ssid: network.ssid }));
+    if (network.secure && !wifi.saved.includes(network.ssid)) {
+      if (joining !== network.ssid) {
+        password = identity = domain = '';
+        profile = null;
+      }
+      joining = network.ssid;
+    } else run(post({ ssid: network.ssid }));
+  }
+  // Enterprise: the profile (or the domain) is what lets the car check it talks to the real server.
+  const enterprise = (ssid) =>
+    profile
+      ? { ssid, identity, eap_config: profile.text, ...(password && { password }) }
+      : { ssid, identity, password, domain: domain.trim() };
+  async function pick(event) {
+    const file = event.currentTarget.files[0];
+    event.currentTarget.value = ''; // picking the same file again still fires
+    if (file) profile = { name: file.name, text: await file.text() };
   }
   const forget = (ssid) => confirm(`Forget ${ssid}?`) && run(api(`wifi/${encodeURIComponent(ssid)}`, { method: 'DELETE' }));
 </script>
@@ -47,9 +67,34 @@
     </section>
     {#if joining === network.ssid}
       <!-- Joining from a phone on the hotspot drops that phone: one radio. -->
-      <form onsubmit={(e) => (e.preventDefault(), run(post(network.enterprise ? { ssid: network.ssid, identity, password } : { ssid: network.ssid, password })))}>
-        {#if network.enterprise}<input bind:value={identity} placeholder="Identity" autocomplete="username" required />{/if}
-        <input type="password" bind:value={password} placeholder="Password" minlength={network.enterprise ? 1 : 8} required />
+      <form onsubmit={(e) => (e.preventDefault(), run(post(network.enterprise ? enterprise(network.ssid) : { ssid: network.ssid, password })))}>
+        {#if network.enterprise}
+          <p class="note">
+            The car only joins after checking the network's server, so a fake {network.ssid} cannot capture your password. Load
+            your institution's profile, or enter its server domain.
+          </p>
+          <input bind:value={identity} placeholder="Username" autocomplete="username" required />
+          <input
+            type="password"
+            bind:value={password}
+            placeholder={profile ? 'Password (if the profile needs one)' : 'Password'}
+            autocomplete="current-password"
+            required={!profile}
+          />
+          <div class="row">
+            <label class="button">
+              {profile ? profile.name : 'Institution profile (.eap-config)'}<!-- no accept filter: phones do not know .eap-config and would grey it out -->
+              <input type="file" hidden onchange={pick} />
+            </label>
+            {#if profile}<button type="button" onclick={() => (profile = null)}>Remove</button>{/if}
+          </div>
+          {#if !profile}
+            <input bind:value={domain} placeholder="Server domain" autocapitalize="off" spellcheck="false" required />
+            <small class="note">From your institution's eduroam setup instructions, e.g. radius.example.edu</small>
+          {/if}
+        {:else}
+          <input type="password" bind:value={password} placeholder="Password" minlength="8" required />
+        {/if}
         <button disabled={busy}>Connect</button>
       </form>
     {/if}
@@ -80,6 +125,22 @@
   span,
   input {
     flex: 1;
+  }
+  .note,
+  .row,
+  .row label {
+    flex: 1 1 100%;
+    margin: 0;
+  }
+  .row {
+    display: flex;
+    gap: 8px;
+  }
+  .row label {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .active {
     color: #86efac;
