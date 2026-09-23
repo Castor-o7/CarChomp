@@ -27,8 +27,10 @@ pub struct Profile {
 }
 
 /// Parse an `.eap-config` file, using the first authentication method in it
-/// that we support. A method without a CA or a server name is refused: joining
-/// with it would not validate the RADIUS server.
+/// that we support (EAP-TLS only when the file carries the client certificate,
+/// since the user has no other way to supply one here). A method without a CA
+/// or a server name is refused: joining with it would not validate the RADIUS
+/// server.
 pub fn parse(xml: &str) -> Result<Profile, String> {
     let doc = roxmltree::Document::parse(xml.trim_start_matches('\u{feff}'))
         .map_err(|e| format!("not an eap-config file: {e}"))?;
@@ -40,7 +42,7 @@ pub fn parse(xml: &str) -> Result<Profile, String> {
         .descendants()
         .filter(|n| is(n, "AuthenticationMethod"))
         .find_map(|n| supported(n).map(|m| (m, n)))
-        .ok_or("the file offers no supported method (EAP-TLS, PEAP/MSCHAPv2, TTLS/PAP or TTLS/MSCHAPv2)")?;
+        .ok_or("the file offers no supported method (EAP-TLS with its client certificate, PEAP/MSCHAPv2, TTLS/PAP or TTLS/MSCHAPv2)")?;
 
     let server = children(auth, "ServerSideCredential").collect::<Vec<_>>();
     let mut ca_pem = String::new();
@@ -72,18 +74,12 @@ pub fn parse(xml: &str) -> Result<Profile, String> {
             .map(|n| text(n).trim().to_string())
             .filter(|s| !s.is_empty())
     };
-    let client_p12 = match client.and_then(|c| {
-        children(c, "ClientCertificate")
-            .find(|n| attr_is(*n, "format", "PKCS12") && attr_is(*n, "encoding", "base64"))
-    }) {
+    let client_p12 = match client_cert(auth) {
         Some(n) => {
             Some(base64_decode(text(n)).ok_or("the client certificate is not valid base64")?)
         }
         None => None,
     };
-    if method == Method::Tls && client_p12.is_none() {
-        return Err("EAP-TLS needs a client certificate, and the file has none".into());
-    }
 
     let ssids = provider
         .descendants()
@@ -115,12 +111,24 @@ fn supported(auth: Node) -> Option<Method> {
         .and_then(|m| children(m, "Type").next())
         .and_then(|t| text(t).trim().parse::<u32>().ok());
     match (outer, inner_eap, inner_non_eap) {
-        (13, _, _) => Some(Method::Tls),
+        (13, _, _) if client_cert(auth).is_some() => Some(Method::Tls),
         (25, Some(26), _) => Some(Method::Peap),
         (21, _, Some(1)) => Some(Method::TtlsPap),
         (21, Some(26), _) | (21, _, Some(3)) => Some(Method::TtlsMschapv2),
         _ => None,
     }
+}
+
+fn client_cert<'a, 'i>(auth: Node<'a, 'i>) -> Option<Node<'a, 'i>> {
+    children(auth, "ClientSideCredential")
+        .next()?
+        .children()
+        .find(|n| {
+            is(n, "ClientCertificate")
+                && attr_is(*n, "format", "PKCS12")
+                && attr_is(*n, "encoding", "base64")
+                && !text(*n).trim().is_empty()
+        })
 }
 
 fn eap_type(node: Node) -> Option<u32> {
@@ -383,8 +391,12 @@ mod tests {
         assert!(
             parse(&cat(&tls))
                 .unwrap_err()
-                .contains("client certificate")
+                .contains("no supported method")
         );
+        // EAP-TLS without a certificate in the file is skipped, not fatal.
+        let p = parse(&cat(&format!("{tls}{}", peap()))).unwrap();
+        assert_eq!(p.method, Method::Peap);
+        assert_eq!(p.client_p12, None);
 
         let pwd_only =
             "<AuthenticationMethod><EAPMethod><Type>52</Type></EAPMethod></AuthenticationMethod>";
