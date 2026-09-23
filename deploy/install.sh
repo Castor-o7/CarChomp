@@ -488,6 +488,8 @@ Description=CarChomp Wi-Fi fallback check
 [Timer]
 OnBootSec=45s
 OnUnitActiveSec=30s
+# systemd's default AccuracySec (1 min) would make this about once a minute.
+AccuracySec=1s
 
 [Install]
 WantedBy=timers.target

@@ -12,6 +12,9 @@ Conflicts=shutdown.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f /etc/carchomp/firewall.nft
+# A reload swaps the table in one transaction (the file deletes and remakes
+# it); a restart would leave input open between ExecStop and ExecStart.
+ExecReload=/usr/sbin/nft -f /etc/carchomp/firewall.nft
 ExecStop=/usr/sbin/nft delete table inet carchomp
 
 [Install]

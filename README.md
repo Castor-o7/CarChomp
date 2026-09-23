@@ -102,8 +102,10 @@ controls (eduroam, a cafe), so this is enforced three times over:
   hotspot's clients (web UI, SSH, DHCP, DNS, mDNS), SSH from anywhere, replies
   to the car's own connections, and the ICMP that networks need. The rules
   match addresses, not interfaces, since the one Wi-Fi radio is sometimes
-  the hotspot and sometimes a client. NetworkManager's own hotspot rules are
-  left alone.
+  the hotspot and sometimes a client; a strict reverse-path check drops
+  packets whose source address is not routed back out the interface they
+  came in on, so a cafe neighbour cannot pose as a hotspot client.
+  NetworkManager's own hotspot rules are left alone.
 - carchompd answers anyone outside `trusted_networks` with 403.
 
 `--admin-net CIDR` opens all three to another network: it is added to the

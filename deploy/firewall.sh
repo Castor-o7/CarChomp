@@ -29,7 +29,11 @@ table inet carchomp {
         # The hotspot: web UI, SSH, and NetworkManager's dnsmasq (DNS, DHCP;
         # a new client asks for an address from 0.0.0.0), and mDNS.
         ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept
-        ip saddr 10.42.0.0/24 tcp dport { 22, 53, 80 } accept
+        # Strict reverse path: the rules below trust source addresses, so a
+        # packet must come in on the interface its source is routed through.
+        # Without this, anyone on a cafe network could claim 10.42.0.x.
+        fib saddr . iif oif missing drop
+        ip saddr 10.42.0.0/24 ip daddr 10.42.0.1 tcp dport { 22, 53, 80 } accept
         ip saddr 10.42.0.0/24 udp dport { 53, 67, 5353 } accept
         # SSH from anywhere: key-only once a user has a key (install.sh).
         tcp dport 22 accept
