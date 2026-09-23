@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 EARTH = 111_320  # metres per degree of latitude
 PARK = 400  # seconds parked between drives; longer than carchompd's track_idle
-CRUISE = 13.0  # m/s, for GPX files without timestamps
+CRUISE = 13.0  # m/s, for GPX files without (usable) timestamps
 
 
 def step(lat, lon, course, metres):
@@ -42,14 +42,30 @@ def block_route():
 
 
 def gpx_route(path):
-    """The file's points resampled to one per second, there and back."""
+    """The file's points resampled to one per second, there and back. Uses
+    the points' <time> when every point has one, otherwise drives at CRUISE."""
     points = [p for p in ET.parse(path).getroot().iter() if p.tag.endswith("trkpt")]  # any GPX namespace
+    if len(points) < 2:
+        raise SystemExit(f"{path}: need at least two track points")
     track = [(float(p.get("lat")), float(p.get("lon"))) for p in points]
+    stamps = [next((c.text for c in p if c.tag.endswith("time")), None) for p in points]
     out = []
-    for (lat1, lon1), (lat2, lon2) in zip(track, track[1:]):
-        metres = math.hypot((lat2 - lat1) * EARTH, (lon2 - lon1) * EARTH * math.cos(math.radians(lat1)))
-        seconds = max(1, round(metres / CRUISE))
-        out += [(lat1 + (lat2 - lat1) * i / seconds, lon1 + (lon2 - lon1) * i / seconds) for i in range(seconds)]
+    if all(stamps):
+        t = [datetime.fromisoformat(s.strip().replace("Z", "+00:00")).timestamp() for s in stamps]
+        if all(a <= b for a, b in zip(t, t[1:])) and t[-1] > t[0]:
+            i = 0
+            for k in range(int(t[-1] - t[0]) + 1):
+                now = t[0] + k
+                while t[i + 1] < now:
+                    i += 1
+                f = (now - t[i]) / (t[i + 1] - t[i]) if t[i + 1] > t[i] else 0
+                (lat1, lon1), (lat2, lon2) = track[i], track[i + 1]
+                out.append((lat1 + (lat2 - lat1) * f, lon1 + (lon2 - lon1) * f))
+    if not out:
+        for (lat1, lon1), (lat2, lon2) in zip(track, track[1:]):
+            metres = math.hypot((lat2 - lat1) * EARTH, (lon2 - lon1) * EARTH * math.cos(math.radians(lat1)))
+            seconds = max(1, round(metres / CRUISE))
+            out += [(lat1 + (lat2 - lat1) * i / seconds, lon1 + (lon2 - lon1) * i / seconds) for i in range(seconds)]
     parked = [out[-1]] * PARK
     return out + parked + out[::-1] + [out[0]] * PARK
 
