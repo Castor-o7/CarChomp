@@ -7,10 +7,14 @@ use crate::{Bus, Config, Event, Status};
 use carchomp_core::{
     Fix, Observation, aprs,
     beacon::{Params, SmartBeacon},
+    gpsd::Partials,
 };
 use sqlx::PgPool;
 use time::OffsetDateTime;
-use tokio::sync::{broadcast::error::RecvError, watch};
+use tokio::{
+    sync::{broadcast::error::RecvError, watch},
+    time::Instant,
+};
 
 pub async fn source_id(db: &PgPool, kind: &str, name: &str) -> sqlx::Result<i16> {
     // Look before inserting: an INSERT takes an id from the (smallint)
@@ -57,6 +61,12 @@ struct Recorder {
     status: watch::Sender<Status>,
     last_moving: Option<OffsetDateTime>,
     last_road_check: Option<OffsetDateTime>,
+    /// When the open track ends if nothing moving is heard, by the local
+    /// clock: fixes may stop coming at all (receiver unplugged).
+    idle_deadline: Option<Instant>,
+    /// Source of the latest fix, for storing the one the beacon skipped.
+    last_source: Option<i16>,
+    partials: Partials,
 }
 
 /// Seconds between "known road?" checks, whether or not fixes are stored.
@@ -78,6 +88,9 @@ pub fn run(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Config)
         status,
         last_moving: None,
         last_road_check: None,
+        idle_deadline: None,
+        last_source: None,
+        partials: Partials::default(),
     };
     async move {
         let mut events = rec.bus.subscribe();
@@ -85,14 +98,21 @@ pub fn run(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Config)
             tracing::error!("closing abandoned tracks: {e}");
         }
         loop {
-            let result = match events.recv().await {
-                Ok(Event { source, obs: Observation::Fix(fix) }) => rec.fix(source, &fix).await,
-                Ok(Event { source, obs: Observation::Aprs(p) }) => rec.aprs(source, &p).await,
-                Err(RecvError::Lagged(n)) => {
-                    tracing::warn!("recorder fell behind, dropped {n} events");
-                    Ok(())
+            let deadline = rec.idle_deadline;
+            let result = tokio::select! {
+                event = events.recv() => match event {
+                    Ok(Event { source, obs: Observation::Fix(fix) }) => rec.fix(source, &fix).await,
+                    Ok(Event { source, obs: Observation::Aprs(p) }) => rec.aprs(source, &p).await,
+                    Err(RecvError::Lagged(n)) => {
+                        tracing::warn!("recorder fell behind, dropped {n} events");
+                        Ok(())
+                    }
+                    Err(RecvError::Closed) => return,
+                },
+                () = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if deadline.is_some() => {
+                    rec.last_moving = None;
+                    rec.end_track().await
                 }
-                Err(RecvError::Closed) => return,
             };
             // A database hiccup must not stop recording for the rest of the drive.
             if let Err(e) = result {
@@ -104,13 +124,20 @@ pub fn run(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Config)
 
 impl Recorder {
     async fn fix(&mut self, source: i16, fix: &Fix) -> sqlx::Result<()> {
+        if self.partials.is_partial(fix) {
+            return Ok(());
+        }
         let moving = fix.speed.unwrap_or(0.0) >= self.params.low_speed;
         let idle = self
             .last_moving
             .is_some_and(|t| (fix.time - t).as_seconds_f64() > self.track_idle);
         if moving {
             self.last_moving = Some(fix.time);
+            self.idle_deadline = std::time::Duration::try_from_secs_f64(self.track_idle.max(0.0))
+                .ok()
+                .and_then(|d| Instant::now().checked_add(d));
         }
+        self.last_source = Some(source);
         if idle {
             self.end_track().await?;
         }
@@ -198,14 +225,21 @@ impl Recorder {
     }
 
     async fn end_track(&mut self) -> sqlx::Result<()> {
+        self.idle_deadline = None;
         let track = self.status.borrow().track;
         if let Some(id) = track {
+            // End it where we last were, not at the last fix worth keeping.
+            let last = self.beacon.take_skipped();
+            let stored = match (last, self.last_source) {
+                (Some(fix), Some(source)) => insert_fixes(&self.db, source, id, &[fix]).await,
+                _ => Ok(()),
+            };
             // Cleared even if the database fails, so the track is picked up
             // as abandoned at the next start rather than retried every fix;
             // but only once it is stored, so clients reload a finished track.
             let finished = finish_track(&self.db, id).await;
             self.set(|s| *s = Status::default());
-            finished?;
+            stored.and(finished)?;
             tracing::info!("track {id} ended");
         }
         Ok(())
