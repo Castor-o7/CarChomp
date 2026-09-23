@@ -19,13 +19,16 @@ use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex};
 /// join or forget: deleting it would strand every client of the hotspot.
 const HOTSPOT: &str = "carchomp-hotspot";
 
-/// One radio, one NetworkManager: changes go one at a time, and a request
-/// that finds one under way is turned away instead of queued.
+/// One radio, one NetworkManager: one nmcli conversation at a time. A change
+/// waits out a scan but is turned away if another change holds the radio.
 static NMCLI: Mutex<()> = Mutex::const_new(());
 
 /// Longest any nmcli call may take. Activations pass `--wait` (below this),
 /// so NetworkManager gives up first.
 const NMCLI_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a change waits for the lock: long enough for a scan (the UI
+/// polls the list), not for another change.
+const CHANGE_WAIT: Duration = Duration::from_secs(15);
 const WAIT: &str = "45";
 
 pub fn router() -> Router {
@@ -172,7 +175,7 @@ async fn connect(Json(join): Json<Join>) -> Result<StatusCode, Response> {
     if !valid(&join.ssid) || control(&join.password) || control(&join.identity) || bad_identity {
         return Err(StatusCode::BAD_REQUEST.into_response());
     }
-    let Ok(_nmcli) = NMCLI.try_lock() else { return Err(busy()) };
+    let Ok(_nmcli) = tokio::time::timeout(CHANGE_WAIT, NMCLI.lock()).await else { return Err(busy()) };
     let saved = saved().await?;
     let profile = saved.iter().find(|(ssid, _)| *ssid == join.ssid).map(|(_, uuid)| uuid.as_str());
     if let Some(identity) = &join.identity {
@@ -233,7 +236,7 @@ async fn forget(Path(ssid): Path<String>) -> Result<StatusCode, Response> {
     if !valid(&ssid) {
         return Err(StatusCode::BAD_REQUEST.into_response());
     }
-    let Ok(_nmcli) = NMCLI.try_lock() else { return Err(busy()) };
+    let Ok(_nmcli) = tokio::time::timeout(CHANGE_WAIT, NMCLI.lock()).await else { return Err(busy()) };
     let saved = saved().await?;
     let Some((_, uuid)) = saved.iter().find(|(saved, _)| *saved == ssid) else {
         return Err(StatusCode::NOT_FOUND.into_response());
