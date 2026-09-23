@@ -116,13 +116,20 @@ joins mid-drive is immediately correct.
 3. ~~new-road detection; APRS source: positions, weather, objects/items,
    bulletins~~ (tested against `tools/sim.py`, not yet a real TNC)
 4. ~~UI: map, live position, track overlay, new-road indicator, track manager~~
-5. ~~import/export, system health~~; system updates from the web UI
+5. ~~import/export, system health, system updates from the web UI~~
+   (update upload untested on hardware)
 6. ~~offline maps: PMTiles regions served by the daemon, download manager~~
 7. ~~Wi-Fi: scan / join / forget; hotspot fallback as a NetworkManager profile~~
    (untested on hardware)
-8. ~~install script, systemd unit, kiosk autostart~~; pi-gen stage, image CI
+8. ~~install script, systemd unit, kiosk autostart, release bundle, pi-gen
+   stage, CI~~ (image build not yet run)
 9. ~~heading-aware "uses this road" matching~~; per-track colours
-10. GPS-disciplined time (chrony + gpsd) for a Pi with no RTC and no network
+10. ~~GPS-disciplined time (chrony + gpsd) for a Pi with no RTC and no network~~
+    (untested on hardware)
+11. ~~network access: full API only from localhost and the car's hotspot
+    (`trusted_networks`)~~
+12. ~~installer: `--gps DEVICE`, `--radio` (rtl_fm + Direwolf, receive only)~~
+    (untested on hardware)
 
 ## Position from RF (stretch goal)
 
