@@ -13,6 +13,10 @@ const MAX_FRAME: usize = 1024;
 pub struct Decoder {
     buf: Vec<u8>,
     escaped: bool,
+    /// Seen the first FEND; bytes before it are the tail of some frame.
+    synced: bool,
+    /// The current frame exceeded `MAX_FRAME` and will be dropped.
+    overflow: bool,
 }
 
 impl Decoder {
@@ -20,16 +24,21 @@ impl Decoder {
     /// data frame (KISS command byte stripped).
     pub fn push(&mut self, bytes: &[u8], mut on_frame: impl FnMut(&[u8])) {
         for &b in bytes {
+            if !self.synced {
+                self.synced = b == FEND;
+                continue;
+            }
             match (b, self.escaped) {
                 (FEND, _) => {
                     // Command byte: high nibble is the TNC port, low nibble 0 = data.
                     if let [cmd, payload @ ..] = &self.buf[..] {
-                        if cmd & 0x0F == 0 && !payload.is_empty() {
+                        if cmd & 0x0F == 0 && !payload.is_empty() && !self.overflow {
                             on_frame(payload);
                         }
                     }
                     self.buf.clear();
                     self.escaped = false;
+                    self.overflow = false;
                 }
                 (FESC, false) => self.escaped = true,
                 (TFEND, true) => self.put(FEND),
@@ -43,6 +52,8 @@ impl Decoder {
         self.escaped = false;
         if self.buf.len() < MAX_FRAME {
             self.buf.push(b);
+        } else {
+            self.overflow = true;
         }
     }
 }
@@ -76,5 +87,20 @@ mod tests {
     fn skips_empty_and_non_data_frames() {
         let got = frames(&[&[FEND, FEND, 0x06, 1, FEND, 0x10, b'x', FEND]]);
         assert_eq!(got, [b"x".to_vec()]); // port 1 data frame is still data
+    }
+
+    #[test]
+    fn bytes_before_the_first_fend_are_discarded() {
+        // 0x30 has a zero low nibble, so the tail would otherwise pass as a data frame.
+        let got = frames(&[&[0x30, b'j', b'u', b'n', b'k', FEND, 0x00, b'x', FEND]]);
+        assert_eq!(got, [b"x".to_vec()]);
+    }
+
+    #[test]
+    fn overlong_frame_is_dropped_not_truncated() {
+        let mut long = vec![FEND, 0x00];
+        long.extend(std::iter::repeat_n(b'z', MAX_FRAME + 1));
+        long.extend([FEND, 0x00, b'x', FEND]);
+        assert_eq!(frames(&[&long]), [b"x".to_vec()]);
     }
 }
