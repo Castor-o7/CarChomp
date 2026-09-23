@@ -148,6 +148,22 @@ async fn serve(addr: SocketAddr, listener: Option<TcpListener>, app: axum::Route
     }
 }
 
+/// Wait for SIGINT (Ctrl-C) or SIGTERM (how systemd stops us).
+async fn stopped() {
+    use tokio::signal::unix::{SignalKind, signal};
+    match signal(SignalKind::terminate()) {
+        Ok(mut term) => tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        },
+        Err(e) => {
+            tracing::warn!("cannot catch SIGTERM: {e}");
+            tokio::signal::ctrl_c().await.ok();
+        }
+    }
+    tracing::info!("stopping");
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -206,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
     for (addr, listener) in listeners {
         servers.spawn(serve(addr, listener, app.clone(), stop.subscribe()));
     }
-    tokio::signal::ctrl_c().await.ok();
+    stopped().await;
     stop.send_replace(());
     while servers.join_next().await.transpose()?.is_some() {}
     Ok(())

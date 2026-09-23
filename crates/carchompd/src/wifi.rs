@@ -240,11 +240,21 @@ struct Join {
 
 /// A checked enterprise join: who, the secret for `--ask` (password, or the
 /// EAP-TLS key's passphrase), and how the server is checked.
-#[derive(Debug)]
 struct Enterprise {
     identity: String,
     secret: String,
     server: EnterpriseServer,
+}
+
+/// By hand, so that no `{:?}` can print the secret.
+impl std::fmt::Debug for Enterprise {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("Enterprise")
+            .field("identity", &self.identity)
+            .field("secret", &"<redacted>")
+            .field("server", &self.server)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -274,10 +284,12 @@ fn enterprise_join(join: &Join) -> Result<Enterprise, String> {
     }
     let (secret, server) = match file {
         Some(p) => {
-            if p.server_names.iter().any(|n| n.contains(';') || n.chars().any(char::is_control))
-                || p.anonymous_identity.as_deref().is_some_and(|a| !arg(a))
-            {
-                return Err("the profile has a server name or outer identity that cannot be used".into());
+            // NetworkManager reads domain-suffix-match as a ';'-separated list.
+            if !p.server_names.iter().all(|n| server_name(n)) {
+                return Err("the profile has a server name (ServerID) that cannot be used".into());
+            }
+            if p.anonymous_identity.as_deref().is_some_and(|a| !arg(a)) {
+                return Err("the profile has an outer identity that cannot be used".into());
             }
             let secret = match p.method {
                 Method::Tls => p.passphrase.clone().unwrap_or(password),
@@ -295,7 +307,7 @@ fn enterprise_join(join: &Join) -> Result<Enterprise, String> {
                 return Err("the server domain is needed to check the network's server (or load the institution's profile)".into());
             }
             let label = |l: &str| !l.is_empty() && !l.starts_with('-') && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
-            if !domain.split('.').all(label) {
+            if !domain.contains('.') || !domain.split('.').all(label) {
                 return Err("that is not a server domain (e.g. radius.example.edu)".into());
             }
             if password.is_empty() {
@@ -305,6 +317,14 @@ fn enterprise_join(join: &Join) -> Result<Enterprise, String> {
         }
     };
     Ok(Enterprise { identity, secret, server })
+}
+
+/// A server name for `802-1x.domain-suffix-match`: one entry of its
+/// `;`-separated list, and not something nmcli could take for an option.
+fn server_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('-')
+        && !name.chars().any(|c| c == ';' || c == ',' || c.is_whitespace() || c.is_control())
 }
 
 async fn connect(Json(join): Json<Join>) -> Result<StatusCode, Response> {
@@ -503,6 +523,9 @@ mod tests {
             serde_json::json!({ "ssid": "e", "identity": "prof", "password": "pw", "domain": "" }),
             serde_json::json!({ "ssid": "e", "identity": "prof", "password": "pw", "domain": "a;b.edu" }),
             serde_json::json!({ "ssid": "e", "identity": "prof", "password": "pw", "domain": "-x.edu" }),
+            serde_json::json!({ "ssid": "e", "identity": "prof", "password": "pw", "domain": "localhost" }),
+            serde_json::json!({ "ssid": "e", "identity": "prof", "password": "pw", "domain": "a,b.edu" }),
+            serde_json::json!({ "ssid": "e", "identity": "prof", "password": "pw", "domain": "radius pdx.edu" }),
             serde_json::json!({ "ssid": "e", "identity": "prof", "domain": "radius.pdx.edu" }),
             serde_json::json!({ "ssid": "e", "identity": "", "password": "pw", "domain": "radius.pdx.edu" }),
             serde_json::json!({ "ssid": "e", "identity": "-o", "password": "pw", "domain": "radius.pdx.edu" }),
@@ -524,8 +547,18 @@ mod tests {
         let why = join(serde_json::json!({ "ssid": "e", "identity": "p", "password": "pw", "eap_config": no_server, "domain": "x.edu" }))
             .unwrap_err();
         assert!(why.contains("ServerID"), "{why}");
-        let two = peap.replace("radius.example.edu<", "a.edu;b.edu<");
-        assert!(join(serde_json::json!({ "ssid": "e", "identity": "p", "password": "pw", "eap_config": two })).is_err());
+        for bad in ["a.edu;b.edu", "a.edu,b.edu", "a.edu b.edu", "-radius.example.edu"] {
+            let file = peap.replace("radius.example.edu<", &format!("{bad}<"));
+            let why = join(serde_json::json!({ "ssid": "e", "identity": "p", "password": "pw", "eap_config": file })).unwrap_err();
+            assert!(why.contains("ServerID"), "{bad}: {why}");
+        }
+    }
+
+    #[test]
+    fn debug_hides_the_secret() {
+        let ok = join(serde_json::json!({ "ssid": "e", "identity": "prof", "password": "hunter2", "domain": "radius.pdx.edu" })).unwrap();
+        let shown = format!("{ok:?}");
+        assert!(!shown.contains("hunter2") && shown.contains("<redacted>"), "{shown}");
     }
 
     #[test]
