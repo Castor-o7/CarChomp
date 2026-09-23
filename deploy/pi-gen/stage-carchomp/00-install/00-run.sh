@@ -10,7 +10,8 @@ cp -a files/carchomp "${ROOTFS_DIR}${src}"
 
 on_chroot <<CHROOT
 set -e
-${src}/deploy/install.sh --kiosk "${FIRST_USER_NAME}" ${CARCHOMP_DEMO:+--demo}
+# </dev/null: anything that read standard input would eat the rest of this script.
+${src}/deploy/install.sh --kiosk "${FIRST_USER_NAME}" ${CARCHOMP_DEMO:+--demo} </dev/null
 service postgresql stop
 systemctl enable postgresql carchompd
 if [ -f /etc/systemd/system/carchomp-sim.service ]; then systemctl enable carchomp-sim; fi

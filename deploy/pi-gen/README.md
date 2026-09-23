@@ -56,6 +56,6 @@ The installer runs in a chroot, where nothing can be started:
   drop-in), since the kiosk starts with the desktop session.
 - The Wi-Fi hotspot cannot be set up: NetworkManager is not running. After
   first boot, set the Wi-Fi country and run `deploy/install.sh --kiosk pi
-  --hotspot SSID PASSPHRASE` from a release bundle.
+  --hotspot SSID` from a release bundle; it asks for the passphrase.
 - The map fonts and sprites and the `pmtiles` tool are downloaded while the
   image is built, so the image works offline from the start.

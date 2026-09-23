@@ -49,7 +49,7 @@ if [ -n "$reuse" ]; then
         # Installed before install.env existed: read the options off the system.
         [ ! -f /etc/systemd/system/carchomp-sim.service ] || DEMO=yes
         for f in /root/.config/labwc/autostart /home/*/.config/labwc/autostart; do
-            if grep -qs 'http://localhost' "$f"; then KIOSK_USER=$(stat -c %U "$f"); break; fi
+            if grep -qsE 'http://localhost|carchomp/kiosk\.sh' "$f"; then KIOSK_USER=$(stat -c %U "$f"); break; fi
         done
     fi
     kiosk_user=$KIOSK_USER demo=$DEMO radio=$RADIO gps=$GPS_DEVICE
