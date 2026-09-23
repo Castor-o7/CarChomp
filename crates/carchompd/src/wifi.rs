@@ -10,9 +10,12 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get},
 };
-use carchomp_core::nm;
+use carchomp_core::{
+    eapconfig::{self, Method, Profile},
+    nm,
+};
 use serde::Deserialize;
-use std::{process::Stdio, time::Duration};
+use std::{io, path::PathBuf, process::Stdio, time::Duration};
 use tokio::{io::AsyncWriteExt, process::Command, sync::Mutex};
 
 /// The fallback access point's profile (deploy/install.sh). Not a network to
@@ -30,6 +33,10 @@ const NMCLI_TIMEOUT: Duration = Duration::from_secs(60);
 /// polls the list), not for another change.
 const CHANGE_WAIT: Duration = Duration::from_secs(15);
 const WAIT: &str = "45";
+
+/// Where the CA bundle and client certificate of an `.eap-config` join live,
+/// one directory per SSID (see [`files_dir`]).
+const FILES: &str = "/var/lib/carchomp/wifi";
 
 pub fn router() -> Router {
     Router::new()
@@ -120,6 +127,64 @@ fn added_uuid(output: &str) -> Option<&str> {
     (!uuid.is_empty() && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')).then_some(uuid)
 }
 
+/// The UUID in `nmcli device wifi connect`'s "Device 'wlan0' successfully
+/// activated with 'UUID'."
+fn activated_uuid(output: &str) -> Option<&str> {
+    let (_, rest) = output.rsplit_once(" with '")?;
+    let (uuid, _) = rest.split_once('\'')?;
+    (!uuid.is_empty() && uuid.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')).then_some(uuid)
+}
+
+/// The directory for an SSID's files: bytes other than ASCII letters, digits,
+/// `-` and `_` become `%XX`, so no two SSIDs share one, and the path has no
+/// space or comma (nmcli reads a private key as "path [password]").
+fn files_dir(ssid: &str) -> PathBuf {
+    let mut name = String::new();
+    for b in ssid.bytes() {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
+            name.push(b as char);
+        } else {
+            name.push_str(&format!("%{b:02X}"));
+        }
+    }
+    PathBuf::from(FILES).join(name)
+}
+
+/// Write an `.eap-config` join's CA bundle and (EAP-TLS) client certificate
+/// into `dir`, readable by us and NetworkManager (root) only. Returns their
+/// paths.
+fn save_files(dir: &std::path::Path, profile: &Profile) -> io::Result<(String, Option<String>)> {
+    use std::{
+        io::Write,
+        os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    };
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+    let write = |name: &str, data: &[u8]| -> io::Result<String> {
+        let path = dir.join(name);
+        // A fresh file, so it has the mode below whatever was there before.
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?.write_all(data)?;
+        path.into_os_string().into_string().map_err(|_| io::ErrorKind::InvalidData.into())
+    };
+    let ca = write("ca.pem", profile.ca_pem.as_bytes())?;
+    let client = match (&profile.client_p12, profile.method) {
+        (Some(p12), Method::Tls) => Some(write("client.p12", p12)?),
+        _ => None,
+    };
+    Ok((ca, client))
+}
+
+/// Remove an SSID's files, if it has any.
+fn remove_files(ssid: &str) {
+    match std::fs::remove_dir_all(files_dir(ssid)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => tracing::warn!("removing {}: {e}", files_dir(ssid).display()),
+        _ => {}
+    }
+}
+
 /// UUIDs of saved Wi-Fi profiles in `nmcli -t -f NAME,UUID,TYPE connection
 /// show`, without the hotspot.
 fn wifi_profiles(output: &str) -> Vec<String> {
@@ -163,69 +228,162 @@ fn busy() -> Response {
 struct Join {
     ssid: String,
     password: Option<String>,
-    /// WPA-Enterprise user name; joins with PEAP/MSCHAPv2.
+    /// WPA-Enterprise user name.
     identity: Option<String>,
+    /// The text of an eduroam CAT / geteduroam `.eap-config` file: the
+    /// method, and the CA and server names that identify the RADIUS server.
+    eap_config: Option<String>,
+    /// Without a file: the RADIUS server's domain, checked against the
+    /// system CAs.
+    domain: Option<String>,
+}
+
+/// A checked enterprise join: who, the secret for `--ask` (password, or the
+/// EAP-TLS key's passphrase), and how the server is checked.
+#[derive(Debug)]
+struct Enterprise {
+    identity: String,
+    secret: String,
+    server: EnterpriseServer,
+}
+
+#[derive(Debug)]
+enum EnterpriseServer {
+    File(Profile),
+    Domain(String),
+}
+
+/// Check an enterprise join. There is no way to join without checking the
+/// server: a file must name its CA and server (eapconfig refuses it
+/// otherwise), and without one a domain is required. `Err` says why not.
+fn enterprise_join(join: &Join) -> Result<Enterprise, String> {
+    // Values go on nmcli's argument list, or (secrets) one line of its input.
+    let arg = |s: &str| !s.is_empty() && !s.starts_with('-') && !s.chars().any(char::is_control);
+    let password = join.password.clone().unwrap_or_default();
+    let file = join.eap_config.as_deref().map(eapconfig::parse).transpose()?;
+    let body_identity = join.identity.clone().filter(|i| !i.is_empty());
+    let identity = match &file {
+        // The certificate's own identity, when the file has it.
+        Some(p) if p.method == Method::Tls => p.identity.clone().or(body_identity),
+        Some(p) => body_identity.or(p.identity.clone()),
+        None => body_identity,
+    };
+    let identity = identity.ok_or("a username is needed")?;
+    if !arg(&identity) {
+        return Err("that username cannot be used".into());
+    }
+    let (secret, server) = match file {
+        Some(p) => {
+            if p.server_names.iter().any(|n| n.contains(';') || n.chars().any(char::is_control))
+                || p.anonymous_identity.as_deref().is_some_and(|a| !arg(a))
+            {
+                return Err("the profile has a server name or outer identity that cannot be used".into());
+            }
+            let secret = match p.method {
+                Method::Tls => p.passphrase.clone().unwrap_or(password),
+                _ if password.is_empty() => return Err("a password is needed".into()),
+                _ => password,
+            };
+            if secret.chars().any(char::is_control) {
+                return Err("the profile's passphrase cannot be used".into());
+            }
+            (secret, EnterpriseServer::File(p))
+        }
+        None => {
+            let domain = join.domain.as_deref().unwrap_or_default().trim();
+            if domain.is_empty() {
+                return Err("the server domain is needed to check the network's server (or load the institution's profile)".into());
+            }
+            let label = |l: &str| !l.is_empty() && !l.starts_with('-') && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+            if !domain.split('.').all(label) {
+                return Err("that is not a server domain (e.g. radius.example.edu)".into());
+            }
+            if password.is_empty() {
+                return Err("a password is needed".into());
+            }
+            (password, EnterpriseServer::Domain(domain.to_string()))
+        }
+    };
+    Ok(Enterprise { identity, secret, server })
 }
 
 async fn connect(Json(join): Json<Join>) -> Result<StatusCode, Response> {
     let control = |s: &Option<String>| s.as_deref().is_some_and(|s| s.chars().any(char::is_control));
-    // PEAP/MSCHAPv2 needs both halves.
-    let bad_identity = join.identity.is_some() && join.password.as_deref().is_none_or(str::is_empty)
-        || join.identity.as_deref().is_some_and(|i| i.is_empty() || i.starts_with('-'));
-    if !valid(&join.ssid) || control(&join.password) || control(&join.identity) || bad_identity {
+    if !valid(&join.ssid) || control(&join.password) || control(&join.identity) || control(&join.domain) {
         return Err(StatusCode::BAD_REQUEST.into_response());
     }
+    let enterprise_as = if join.identity.is_some() || join.eap_config.is_some() || join.domain.is_some() {
+        Some(enterprise_join(&join).map_err(|why| (StatusCode::BAD_REQUEST, why).into_response())?)
+    } else {
+        None
+    };
     let Ok(_nmcli) = tokio::time::timeout(CHANGE_WAIT, NMCLI.lock()).await else { return Err(busy()) };
     let saved = saved().await?;
     let profile = saved.iter().find(|(ssid, _)| *ssid == join.ssid).map(|(_, uuid)| uuid.as_str());
-    if let Some(identity) = &join.identity {
-        return enterprise(&join.ssid, identity, join.password.as_deref().unwrap_or_default(), profile).await;
+    if let Some(join_as) = enterprise_as {
+        return enterprise(&join.ssid, join_as, profile).await;
     }
-    match (&join.password, profile) {
-        (None, Some(uuid)) => nmcli(&["--wait", WAIT, "connection", "up", "uuid", uuid]).await?,
+    let out = match (&join.password, profile) {
+        (None, Some(uuid)) => return nmcli(&["--wait", WAIT, "connection", "up", "uuid", uuid]).await.map(|_| StatusCode::NO_CONTENT),
         (None, None) => nmcli(&["--wait", WAIT, "device", "wifi", "connect", &join.ssid]).await?,
         (Some(password), _) => nmcli_with(&["--wait", WAIT, "--ask", "device", "wifi", "connect", &join.ssid], Some(password)).await?,
     };
+    // Connected; a profile that then does not retry forever is logged, not an error.
+    match activated_uuid(&out) {
+        Some(uuid) => _ = nmcli(&[&["connection", "modify", "uuid", uuid][..], &nm::autoconnect(false)].concat()).await,
+        None => tracing::warn!("nmcli device wifi connect: unexpected output {:?}", out.trim()),
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Join a WPA-Enterprise network with PEAP/MSCHAPv2, updating the saved
-/// profile if there is one. Its old password is cleared so NetworkManager
-/// asks for one, and `--ask` answers from standard input, as for WPA-PSK:
-/// never on the argument list. NetworkManager keeps a password it had to ask
-/// for. A profile made here is removed again if it does not connect.
-async fn enterprise(ssid: &str, identity: &str, password: &str, profile: Option<&str>) -> Result<StatusCode, Response> {
-    let settings = [
-        "wifi-sec.key-mgmt",
-        "wpa-eap",
-        "802-1x.eap",
-        "peap",
-        "802-1x.phase2-auth",
-        "mschapv2",
-        "802-1x.identity",
-        identity,
-        "802-1x.system-ca-certs",
-        "no",
-        "802-1x.password",
-        "",
-    ];
+/// Join a WPA-Enterprise network, updating the saved profile if there is
+/// one. Its old secrets are cleared so NetworkManager asks for them, and
+/// `--ask` answers from standard input, as for WPA-PSK: never on the
+/// argument list. NetworkManager keeps a secret it had to ask for. A profile
+/// made here is removed again (with its files) if it does not connect.
+async fn enterprise(ssid: &str, join: Enterprise, profile: Option<&str>) -> Result<StatusCode, Response> {
+    let dir = files_dir(ssid);
+    let settings = match &join.server {
+        EnterpriseServer::File(p) => {
+            let (ca_cert, client_cert) = save_files(&dir, p).map_err(|e| {
+                tracing::warn!("saving Wi-Fi files in {}: {e}", dir.display());
+                (StatusCode::INTERNAL_SERVER_ERROR, "could not save the profile's certificates (see the daemon log)").into_response()
+            })?;
+            let server = nm::Server::File { profile: p, ca_cert: &ca_cert, client_cert: client_cert.as_deref() };
+            nm::enterprise_settings(&join.identity, &server)
+        }
+        EnterpriseServer::Domain(domain) => nm::enterprise_settings(&join.identity, &nm::Server::Domain(domain)),
+    };
+    let settings: Vec<&str> = settings.iter().map(String::as_str).collect();
     let (uuid, created) = match profile {
         Some(uuid) => {
             nmcli(&[&["connection", "modify", "uuid", uuid][..], &settings].concat()).await?;
             (uuid.to_owned(), false)
         }
         None => {
-            let out = nmcli(&[&["connection", "add", "type", "wifi", "con-name", ssid, "ssid", ssid][..], &settings].concat()).await?;
+            let out = match nmcli(&[&["connection", "add", "type", "wifi", "con-name", ssid, "ssid", ssid][..], &settings].concat()).await {
+                Ok(out) => out,
+                Err(response) => {
+                    remove_files(ssid);
+                    return Err(response);
+                }
+            };
             let Some(uuid) = added_uuid(&out) else {
                 tracing::warn!("nmcli connection add: unexpected output {:?}", out.trim());
+                remove_files(ssid);
                 return Err((StatusCode::BAD_GATEWAY, "NetworkManager could not do that (see the daemon log)").into_response());
             };
             (uuid.to_owned(), true)
         }
     };
-    if let Err(response) = nmcli_with(&["--wait", WAIT, "--ask", "connection", "up", "uuid", &uuid], Some(password)).await {
+    if matches!(join.server, EnterpriseServer::Domain(_)) {
+        // The profile no longer points at any.
+        remove_files(ssid);
+    }
+    if let Err(response) = nmcli_with(&["--wait", WAIT, "--ask", "connection", "up", "uuid", &uuid], Some(&join.secret)).await {
         if created {
             let _ = nmcli(&["connection", "delete", "uuid", &uuid]).await;
+            remove_files(ssid);
         }
         return Err(response);
     }
@@ -242,6 +400,7 @@ async fn forget(Path(ssid): Path<String>) -> Result<StatusCode, Response> {
         return Err(StatusCode::NOT_FOUND.into_response());
     };
     nmcli(&["connection", "delete", "uuid", uuid]).await?;
+    remove_files(&ssid);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -283,5 +442,102 @@ mod tests {
         let out = "Connection 'eduroam (campus)' (0f5c2c3e-1b2a-4d7e-9f00-0123456789ab) successfully added.\n";
         assert_eq!(added_uuid(out), Some("0f5c2c3e-1b2a-4d7e-9f00-0123456789ab"));
         assert_eq!(added_uuid("Error: nope\n"), None);
+    }
+
+    #[test]
+    fn reads_the_uuid_of_an_activated_profile() {
+        let out = "Device 'wlan0' successfully activated with '0f5c2c3e-1b2a-4d7e-9f00-0123456789ab'.\n";
+        assert_eq!(activated_uuid(out), Some("0f5c2c3e-1b2a-4d7e-9f00-0123456789ab"));
+        assert_eq!(activated_uuid("Error: nope\n"), None);
+    }
+
+    #[test]
+    fn one_plain_directory_per_ssid() {
+        assert_eq!(files_dir("eduroam"), PathBuf::from("/var/lib/carchomp/wifi/eduroam"));
+        assert_eq!(files_dir("Caf\u{e9} a,b"), PathBuf::from("/var/lib/carchomp/wifi/Caf%C3%A9%20a%2Cb"));
+        assert_eq!(files_dir("../x"), PathBuf::from("/var/lib/carchomp/wifi/%2E%2E%2Fx"));
+        // Escaping is one-to-one: "a b" and "a%20b" differ.
+        assert_ne!(files_dir("a b"), files_dir("a%20b"));
+    }
+
+    #[test]
+    fn saves_private_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("carchomp-wifi-test-{}", std::process::id())).join("net");
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let mut p = eapconfig::parse(&xml("25", "<EAPMethod><Type>26</Type></EAPMethod>")).unwrap();
+        p.client_p12 = Some(vec![1, 2, 3]);
+        let (ca, client) = save_files(&dir, &p).unwrap();
+        assert_eq!(std::fs::read_to_string(&ca).unwrap(), p.ca_pem);
+        assert_eq!(client, None, "PEAP needs no client certificate");
+        assert_eq!((mode(&dir), mode(ca.as_ref())), (0o700, 0o600));
+        p.method = Method::Tls;
+        let (_, client) = save_files(&dir, &p).unwrap();
+        let client = client.unwrap();
+        assert_eq!((std::fs::read(&client).unwrap(), mode(client.as_ref())), (vec![1, 2, 3], 0o600));
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
+    fn xml(outer: &str, inner: &str) -> String {
+        format!(
+            r#"<EAPIdentityProviderList><EAPIdentityProvider><AuthenticationMethods><AuthenticationMethod>
+            <EAPMethod><Type>{outer}</Type></EAPMethod>
+            <ServerSideCredential><CA format="X.509" encoding="base64">MIIBAjCBqaADAgECAgEBMAoGCCqGSM49BAMCMA8xDTALBgNVBAMMBENBIDI=</CA><ServerID>radius.example.edu</ServerID></ServerSideCredential>
+            <ClientSideCredential><OuterIdentity>anonymous@example.edu</OuterIdentity></ClientSideCredential>
+            <InnerAuthenticationMethod>{inner}</InnerAuthenticationMethod>
+            </AuthenticationMethod></AuthenticationMethods></EAPIdentityProvider></EAPIdentityProviderList>"#
+        )
+    }
+
+    fn join(body: serde_json::Value) -> Result<Enterprise, String> {
+        enterprise_join(&serde_json::from_value(body).unwrap())
+    }
+
+    #[test]
+    fn enterprise_joins_always_check_the_server() {
+        let ok = join(serde_json::json!({ "ssid": "eduroam", "identity": "prof@pdx.edu", "password": "pw", "domain": " radius.pdx.edu " })).unwrap();
+        assert_eq!((ok.identity.as_str(), ok.secret.as_str()), ("prof@pdx.edu", "pw"));
+        assert!(matches!(ok.server, EnterpriseServer::Domain(d) if d == "radius.pdx.edu"));
+        for bad in [
+            serde_json::json!({ "ssid": "e", "identity": "prof", "password": "pw" }),
+            serde_json::json!({ "ssid": "e", "identity": "prof", "password": "pw", "domain": "" }),
+            serde_json::json!({ "ssid": "e", "identity": "prof", "password": "pw", "domain": "a;b.edu" }),
+            serde_json::json!({ "ssid": "e", "identity": "prof", "password": "pw", "domain": "-x.edu" }),
+            serde_json::json!({ "ssid": "e", "identity": "prof", "domain": "radius.pdx.edu" }),
+            serde_json::json!({ "ssid": "e", "identity": "", "password": "pw", "domain": "radius.pdx.edu" }),
+            serde_json::json!({ "ssid": "e", "identity": "-o", "password": "pw", "domain": "radius.pdx.edu" }),
+            serde_json::json!({ "ssid": "e", "password": "pw", "domain": "radius.pdx.edu" }),
+        ] {
+            assert!(join(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn enterprise_joins_with_a_profile() {
+        let peap = xml("25", "<EAPMethod><Type>26</Type></EAPMethod>");
+        let ok = join(serde_json::json!({ "ssid": "eduroam", "identity": "prof@example.edu", "password": "pw", "eap_config": peap })).unwrap();
+        assert!(matches!(&ok.server, EnterpriseServer::File(p) if p.method == Method::Peap));
+        assert_eq!(ok.secret, "pw");
+        // PEAP needs the password; the domain field does not stand in for the file's server check.
+        assert!(join(serde_json::json!({ "ssid": "eduroam", "identity": "prof", "eap_config": peap })).is_err());
+        let no_server = peap.replace("<ServerID>radius.example.edu</ServerID>", "");
+        let why = join(serde_json::json!({ "ssid": "e", "identity": "p", "password": "pw", "eap_config": no_server, "domain": "x.edu" }))
+            .unwrap_err();
+        assert!(why.contains("ServerID"), "{why}");
+        let two = peap.replace("radius.example.edu<", "a.edu;b.edu<");
+        assert!(join(serde_json::json!({ "ssid": "e", "identity": "p", "password": "pw", "eap_config": two })).is_err());
+    }
+
+    #[test]
+    fn eap_tls_uses_the_files_identity_and_passphrase() {
+        let tls = xml("13", "").replace(
+            "<OuterIdentity>",
+            "<UserName>dev@example.edu</UserName><Passphrase>secret</Passphrase><ClientCertificate format=\"PKCS12\" encoding=\"base64\">AQID</ClientCertificate><OuterIdentity>",
+        );
+        let ok = join(serde_json::json!({ "ssid": "eduroam", "identity": "typed", "eap_config": tls })).unwrap();
+        assert_eq!((ok.identity.as_str(), ok.secret.as_str()), ("dev@example.edu", "secret"));
+        let bare = tls.replace("<UserName>dev@example.edu</UserName><Passphrase>secret</Passphrase>", "");
+        let ok = join(serde_json::json!({ "ssid": "eduroam", "identity": "typed", "password": "pw", "eap_config": bare })).unwrap();
+        assert_eq!((ok.identity.as_str(), ok.secret.as_str()), ("typed", "pw"));
     }
 }
