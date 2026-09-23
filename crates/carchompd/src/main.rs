@@ -64,7 +64,7 @@ impl Default for Config {
             ui_dir: None,
             maps_dir: "/var/lib/carchomp/maps".into(),
             map_source: None,
-            gpsd: Some("127.0.0.1:2947".into()),
+            gpsd: None,
             aprs_kiss: None,
             beacon: beacon::Params::default(),
             track_idle: 300.0,
