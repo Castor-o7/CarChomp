@@ -1,5 +1,7 @@
-//! Parsing for NetworkManager's `nmcli --terse` output.
+//! Parsing for NetworkManager's `nmcli --terse` output, and the settings
+//! carchompd gives the Wi-Fi profiles it makes.
 
+use crate::eapconfig::{Method, Profile};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -69,6 +71,70 @@ pub fn saved_wifi(output: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every Wi-Fi client profile carchompd makes or changes retries forever
+/// (NetworkManager gives up after 4 failures by default, fatal in a moving
+/// car), and an enterprise network wins over others in range.
+pub fn autoconnect(enterprise: bool) -> [&'static str; 4] {
+    ["connection.autoconnect-retries", "0", "connection.autoconnect-priority", if enterprise { "10" } else { "0" }]
+}
+
+/// How an enterprise join checks that it talks to the real RADIUS server.
+pub enum Server<'a> {
+    /// An `.eap-config` file, its CA bundle (and EAP-TLS client certificate)
+    /// saved at these paths.
+    File { profile: &'a Profile, ca_cert: &'a str, client_cert: Option<&'a str> },
+    /// No file: PEAP/MSCHAPv2, a server certificate from the system CAs for
+    /// this domain.
+    Domain(&'a str),
+}
+
+/// The realm of `user@realm`, if any.
+pub fn realm(identity: &str) -> Option<&str> {
+    identity.rsplit_once('@').map(|(_, realm)| realm).filter(|realm| !realm.is_empty())
+}
+
+/// `nmcli connection add|modify` arguments (property, value, ...) for an
+/// enterprise join. Every 802.1X setting is given, empty when unused, so a
+/// changed profile keeps nothing stale. Secrets are cleared: NetworkManager
+/// then asks for them and `--ask` answers from standard input.
+pub fn enterprise_settings(identity: &str, server: &Server) -> Vec<String> {
+    let (eap, phase2, anonymous, ca_cert, domains, client_cert) = match server {
+        Server::File { profile, ca_cert, client_cert } => {
+            let (eap, phase2) = match profile.method {
+                Method::Tls => ("tls", ""),
+                Method::Peap => ("peap", "mschapv2"),
+                Method::TtlsPap => ("ttls", "pap"),
+                Method::TtlsMschapv2 => ("ttls", "mschapv2"),
+            };
+            let anonymous = profile.anonymous_identity.clone().unwrap_or_default();
+            (eap, phase2, anonymous, *ca_cert, profile.server_names.join(";"), client_cert.unwrap_or_default())
+        }
+        Server::Domain(domain) => {
+            let anonymous = realm(identity).map(|realm| format!("anonymous@{realm}")).unwrap_or_default();
+            ("peap", "mschapv2", anonymous, "", domain.to_string(), "")
+        }
+    };
+    // The file's CA alone, or else the system's: never neither.
+    let system_ca = if ca_cert.is_empty() { "yes" } else { "no" };
+    let settings = [
+        ("wifi-sec.key-mgmt", "wpa-eap"),
+        ("802-1x.eap", eap),
+        ("802-1x.phase2-auth", phase2),
+        ("802-1x.phase2-autheap", ""),
+        ("802-1x.identity", identity),
+        ("802-1x.anonymous-identity", &anonymous),
+        ("802-1x.ca-cert", ca_cert),
+        ("802-1x.system-ca-certs", system_ca),
+        ("802-1x.domain-suffix-match", &domains),
+        // nmcli reads "path [password]": the path holds no spaces.
+        ("802-1x.client-cert", client_cert),
+        ("802-1x.private-key", client_cert),
+        ("802-1x.password", ""),
+        ("802-1x.private-key-password", ""),
+    ];
+    settings.iter().flat_map(|(k, v)| [k, *v]).chain(autoconnect(true)).map(str::to_string).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,5 +165,95 @@ mod tests {
     fn saved_profiles_are_wifi_only() {
         let out = "home:802-11-wireless\nWired connection 1:802-3-ethernet\ncarchomp-hotspot:802-11-wireless\n";
         assert_eq!(saved_wifi(out), ["home", "carchomp-hotspot"]);
+    }
+
+    fn setting<'a>(settings: &'a [String], key: &str) -> &'a str {
+        let i = settings.iter().position(|s| s == key).unwrap_or_else(|| panic!("no {key}"));
+        &settings[i + 1]
+    }
+
+    fn file(method: Method) -> Profile {
+        Profile {
+            method,
+            ca_pem: "-----BEGIN CERTIFICATE-----\n".into(),
+            server_names: vec!["radius.example.edu".into(), "radius2.example.edu".into()],
+            anonymous_identity: Some("anonymous@example.edu".into()),
+            identity: None,
+            client_p12: None,
+            passphrase: None,
+            ssids: vec!["eduroam".into()],
+        }
+    }
+
+    #[test]
+    fn realms() {
+        assert_eq!(realm("prof@pdx.edu"), Some("pdx.edu"));
+        assert_eq!(realm("a@b@c.org"), Some("c.org"));
+        assert_eq!(realm("prof"), None);
+        assert_eq!(realm("prof@"), None);
+    }
+
+    #[test]
+    fn domain_join_validates_against_the_system_cas() {
+        let s = enterprise_settings("prof@pdx.edu", &Server::Domain("radius.pdx.edu"));
+        assert_eq!(s.len() % 2, 0);
+        let want = [
+            ("wifi-sec.key-mgmt", "wpa-eap"),
+            ("802-1x.eap", "peap"),
+            ("802-1x.phase2-auth", "mschapv2"),
+            ("802-1x.identity", "prof@pdx.edu"),
+            ("802-1x.anonymous-identity", "anonymous@pdx.edu"),
+            ("802-1x.ca-cert", ""),
+            ("802-1x.system-ca-certs", "yes"),
+            ("802-1x.domain-suffix-match", "radius.pdx.edu"),
+            ("802-1x.client-cert", ""),
+            ("802-1x.password", ""),
+            ("connection.autoconnect-retries", "0"),
+            ("connection.autoconnect-priority", "10"),
+        ];
+        for (k, v) in want {
+            assert_eq!(setting(&s, k), v, "{k}");
+        }
+        let s = enterprise_settings("prof", &Server::Domain("radius.pdx.edu"));
+        assert_eq!(setting(&s, "802-1x.anonymous-identity"), "");
+    }
+
+    #[test]
+    fn file_join_pins_its_ca_and_server_names() {
+        let peap = file(Method::Peap);
+        let s = enterprise_settings("prof@example.edu", &Server::File { profile: &peap, ca_cert: "/d/ca.pem", client_cert: None });
+        for (k, v) in [
+            ("802-1x.eap", "peap"),
+            ("802-1x.phase2-auth", "mschapv2"),
+            ("802-1x.anonymous-identity", "anonymous@example.edu"),
+            ("802-1x.ca-cert", "/d/ca.pem"),
+            ("802-1x.system-ca-certs", "no"),
+            ("802-1x.domain-suffix-match", "radius.example.edu;radius2.example.edu"),
+            ("802-1x.private-key", ""),
+        ] {
+            assert_eq!(setting(&s, k), v, "{k}");
+        }
+        for (method, eap, phase2) in [(Method::TtlsPap, "ttls", "pap"), (Method::TtlsMschapv2, "ttls", "mschapv2")] {
+            let p = file(method);
+            let s = enterprise_settings("u", &Server::File { profile: &p, ca_cert: "/d/ca.pem", client_cert: None });
+            assert_eq!((setting(&s, "802-1x.eap"), setting(&s, "802-1x.phase2-auth")), (eap, phase2));
+        }
+        let tls = Profile { anonymous_identity: None, ..file(Method::Tls) };
+        let s = enterprise_settings("dev@example.edu", &Server::File { profile: &tls, ca_cert: "/d/ca.pem", client_cert: Some("/d/client.p12") });
+        for (k, v) in [
+            ("802-1x.eap", "tls"),
+            ("802-1x.phase2-auth", ""),
+            ("802-1x.anonymous-identity", ""),
+            ("802-1x.client-cert", "/d/client.p12"),
+            ("802-1x.private-key", "/d/client.p12"),
+            ("802-1x.private-key-password", ""),
+        ] {
+            assert_eq!(setting(&s, k), v, "{k}");
+        }
+    }
+
+    #[test]
+    fn client_profiles_retry_forever() {
+        assert_eq!(autoconnect(false), ["connection.autoconnect-retries", "0", "connection.autoconnect-priority", "0"]);
     }
 }
