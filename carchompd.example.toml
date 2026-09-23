@@ -5,6 +5,9 @@ database_url = "postgres://carchomp@localhost/carchomp"
 listen = "0.0.0.0:8000"
 # 8000 is also Direwolf's default AGW port. On a host that runs both, set
 # `AGWPORT 0` in direwolf.conf or listen on another port.
+# Or several: listen = ["127.0.0.1:80", "10.42.0.1:80"] (the installed
+# default). An address this machine does not have yet, like the hotspot's
+# while it is down, is bound as soon as it appears.
 ui_dir = "/usr/share/carchomp/ui"   # default: none (no web UI is served)
 
 # Who may use the web UI and the API: these networks (CIDR) plus this machine

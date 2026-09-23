@@ -3,6 +3,7 @@
 # Run as root from a checkout or release bundle:
 #
 #   sudo deploy/install.sh [--kiosk USER] [--hotspot SSID] [--gps DEVICE] [--radio] [--demo]
+#                          [--admin-net CIDR]...
 #   sudo deploy/install.sh --reuse
 #
 #   --kiosk USER     open the UI full-screen when USER's desktop session starts
@@ -18,6 +19,10 @@
 #                    everything else can be used and tested on the device.
 #                    Run again without --demo once the hardware is there; that
 #                    deletes what the simulator recorded.
+#   --admin-net CIDR also serve the web UI and the .local name to this IPv4
+#                    network, e.g. 192.168.1.0/24 at home; repeat for more.
+#                    Anyone on it can manage Wi-Fi and install software.
+#                    Without it: this device and its hotspot only (and SSH).
 #   --reuse          run with the options of the last install (from
 #                    /etc/carchomp/install.env), leaving the hotspot as it is;
 #                    this is what an update from the web UI does
@@ -25,7 +30,7 @@
 # Safe to run again: it upgrades in place and keeps data and configuration.
 set -eu
 
-kiosk_user="" ssid="" psk="" demo="" gps="" radio="" reuse="" nargs=$#
+kiosk_user="" ssid="" psk="" demo="" gps="" radio="" reuse="" admin_nets="" derived="" nargs=$#
 while [ $# -gt 0 ]; do
     case $1 in
         --kiosk) kiosk_user=$2; shift 2 ;;
@@ -33,6 +38,7 @@ while [ $# -gt 0 ]; do
         --gps) gps=$2; shift 2 ;;
         --radio) radio=yes; shift ;;
         --demo) demo=yes; shift ;;
+        --admin-net) admin_nets="$admin_nets $2"; shift 2 ;;
         --reuse) reuse=yes; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
@@ -42,6 +48,7 @@ envfile=/etc/carchomp/install.env
 if [ -n "$reuse" ]; then
     [ "$nargs" -eq 1 ] || { echo "--reuse takes no other options" >&2; exit 2; }
     KIOSK_USER="" DEMO="" RADIO="" GPS_DEVICE=""
+    unset ADMIN_NETS
     if [ -f "$envfile" ]; then
         # shellcheck source=/dev/null
         . "$envfile"
@@ -52,7 +59,13 @@ if [ -n "$reuse" ]; then
             if grep -qsE 'http://localhost|carchomp/kiosk\.sh' "$f"; then KIOSK_USER=$(stat -c %U "$f"); break; fi
         done
     fi
-    kiosk_user=$KIOSK_USER demo=$DEMO radio=$RADIO gps=$GPS_DEVICE
+    if [ -z "${ADMIN_NETS+set}" ]; then
+        # Installed before the firewall: keep the web UI open to the networks
+        # the owner added to trusted_networks, so an update locks nobody out.
+        ADMIN_NETS=$(sed -n 's/^trusted_networks *= *\[\(.*\)\].*/\1/p' /etc/carchomp/carchompd.toml 2>/dev/null | tr -d '" ' | tr , ' ')
+        derived=yes
+    fi
+    kiosk_user=$KIOSK_USER demo=$DEMO radio=$RADIO gps=$GPS_DEVICE admin_nets=$ADMIN_NETS
 fi
 # Check the options before changing anything, so a typo cannot leave a half
 # upgraded system behind.
@@ -66,6 +79,36 @@ if [ -n "$gps" ]; then
         *) echo "--gps: expected a device such as /dev/ttyACM0 or /dev/serial0" >&2; exit 2 ;;
     esac
 fi
+# An IPv4 network: a.b.c.d or a.b.c.d/n, no leading zeros (nft reads them
+# as octal).
+valid_net() {
+    a=${1%/*} p=32
+    case $1 in */*) p=${1#*/} ;; esac
+    case $p in "" | *[!0-9]* | 0?*) return 1 ;; esac
+    [ "$p" -le 32 ] || return 1
+    case $a. in *[!0-9.]* | *..* | .*) return 1 ;; esac
+    old=$IFS IFS=.
+    # shellcheck disable=SC2086 # split on the dots
+    set -- $a
+    IFS=$old
+    [ $# -eq 4 ] || return 1
+    for o; do
+        case $o in 0?*) return 1 ;; esac
+        [ "$o" -le 255 ] || return 1
+    done
+}
+nets=""
+for n in $admin_nets; do
+    if valid_net "$n"; then
+        # The hotspot and this device itself are always served.
+        case $n in 10.42.0.0/24 | 127.*) ;; *) nets="$nets $n" ;; esac
+    elif [ -n "$derived" ]; then
+        echo "note: $n (trusted_networks) is not an IPv4 network; the firewall does not open the web UI to it" >&2
+    else
+        echo "--admin-net: expected an IPv4 network such as 192.168.1.0/24: $n" >&2; exit 2
+    fi
+done
+admin_nets=${nets# }
 if [ -n "$kiosk_user" ]; then
     home=$(getent passwd "$kiosk_user" | cut -d: -f6)
     [ -n "$home" ] || { echo "--kiosk: no such user: $kiosk_user" >&2; exit 2; }
@@ -99,7 +142,7 @@ have_systemd() { [ -d /run/systemd/system ]; }
 
 step "Packages"
 export DEBIAN_FRONTEND=noninteractive
-pkgs="postgresql postgresql-postgis gpsd chrony ca-certificates curl git unzip avahi-daemon"
+pkgs="postgresql postgresql-postgis gpsd chrony ca-certificates curl git unzip avahi-daemon nftables"
 [ -z "$ssid" ] || pkgs="$pkgs network-manager iw rfkill"
 [ -z "$radio" ] || pkgs="$pkgs rtl-sdr direwolf"
 [ -z "$demo" ] || pkgs="$pkgs python3"
@@ -187,8 +230,95 @@ step "User, directories, configuration"
 id carchomp >/dev/null 2>&1 || useradd --system --home-dir /var/lib/carchomp --shell /usr/sbin/nologin carchomp
 mkdir -p /var/lib/carchomp/maps /var/lib/carchomp/update /etc/carchomp
 [ -f /etc/carchomp/carchompd.toml ] || install -m 644 "$root/deploy/carchompd.toml" /etc/carchomp/carchompd.toml
+config=/etc/carchomp/carchompd.toml
+# Set a top-level key in carchompd.toml unless the owner already has.
+set_key() {
+    grep -q "^$1 *=" "$config" && return
+    tmp=$(mktemp)
+    { printf '%s = %s\n' "$1" "$2"; sed "/^# *$1 *=/d" "$config"; } >"$tmp"
+    cat "$tmp" >"$config"
+    rm -f "$tmp"
+}
+
+listen_is() { grep -qxF "listen = $1" "$config"; }
+set_listen() { sed -i "s|^listen *=.*|listen = $1|" "$config"; }
+default_listen='["127.0.0.1:80", "10.42.0.1:80"]'
+if [ -n "$admin_nets" ]; then
+    # The device's address on such a network is handed out by DHCP: listen on
+    # all of them (the firewall decides who gets through), trust the networks.
+    if listen_is "$default_listen"; then set_listen '["0.0.0.0:80"]'; fi
+    if grep -q '^trusted_networks *= *\[.*\]' "$config" || ! grep -q '^trusted_networks *=' "$config"; then
+        list=$(sed -n 's/^trusted_networks *= *\[\(.*\)\].*/\1/p' "$config")
+        grep -q '^trusted_networks *=' "$config" || list='"10.42.0.0/24"'
+        for n in $admin_nets; do
+            case $list in *"\"$n\""*) ;; *) list="${list:+$list, }\"$n\"" ;; esac
+        done
+        set_key trusted_networks "[$list]"
+        sed -i "s|^trusted_networks *=.*|trusted_networks = [$list]|" "$config"
+    else
+        echo "warning: add $admin_nets to trusted_networks in $config yourself" >&2
+    fi
+elif listen_is '"0.0.0.0:80"' || listen_is '["0.0.0.0:80"]'; then
+    # The old default, or --admin-net given before: loopback and hotspot only.
+    set_listen "$default_listen"
+fi
 [ -d /var/lib/carchomp/maps/assets ] || "$root/tools/fetch_map_assets.sh" /var/lib/carchomp/maps
 chown -R carchomp: /var/lib/carchomp
+
+step "Firewall: $([ -n "$admin_nets" ] && echo "web UI from the hotspot and $admin_nets" || echo "web UI from the hotspot only")"
+# Replaced in one step, and only by a ruleset nft accepts.
+# shellcheck disable=SC2086 # a list of networks
+sh "$root/deploy/firewall.sh" $admin_nets >/etc/carchomp/firewall.nft.new
+if ! nft -c -f /etc/carchomp/firewall.nft.new; then
+    rm -f /etc/carchomp/firewall.nft.new
+    echo "the new firewall rules do not load; nothing was changed" >&2; exit 1
+fi
+mv -f /etc/carchomp/firewall.nft.new /etc/carchomp/firewall.nft
+install -m 644 "$root/deploy/carchomp-firewall.service" /etc/systemd/system/carchomp-firewall.service
+if have_systemd; then
+    systemctl daemon-reload
+    systemctl enable carchomp-firewall
+    systemctl reload-or-restart carchomp-firewall
+elif command -v systemctl >/dev/null; then
+    # An image being built: enabled now, loaded at its first boot.
+    systemctl enable carchomp-firewall
+fi
+
+step "SSH"
+# Port 22 stays open everywhere, so passwords go, but only once someone can
+# log in with a key: never lock the owner out.
+sshd_conf=/etc/ssh/sshd_config.d/50-carchomp.conf keys=""
+while IFS=: read -r user _ uid _ _ dir _; do
+    if [ "$uid" -ge 1000 ] && [ "$uid" -lt 65534 ] && [ -s "$dir/.ssh/authorized_keys" ]; then keys="$keys $user"; fi
+done <<USERS
+$(getent passwd)
+USERS
+if [ ! -x /usr/sbin/sshd ]; then
+    echo "no SSH server installed"
+elif [ -n "$keys" ]; then
+    mkdir -p "${sshd_conf%/*}"
+    printf '# Written by deploy/install.sh: keys only, since%s can log in with one.\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n' "$keys" >"$sshd_conf"
+    if /usr/sbin/sshd -t; then
+        if have_systemd; then systemctl try-reload-or-restart ssh; fi
+        echo "keys only (keys for:$keys)"
+    else
+        rm -f "$sshd_conf"
+        echo "warning: sshd rejects its configuration; SSH is left as it was" >&2
+    fi
+else
+    if [ -f "$sshd_conf" ]; then
+        rm -f "$sshd_conf"
+        if have_systemd; then systemctl try-reload-or-restart ssh; fi
+    fi
+    cat >&2 <<'WARN'
+**********************************************************************
+WARNING: no user has an SSH key (~/.ssh/authorized_keys), so SSH still
+accepts passwords, on every network the car joins (eduroam, cafes).
+Add one (ssh-copy-id from your computer) and run this installer again,
+or update from the web UI: SSH then takes keys only.
+**********************************************************************
+WARN
+fi
 
 step "Database"
 if have_systemd; then systemctl enable --now postgresql; else service postgresql start; fi
@@ -249,15 +379,6 @@ DELETE FROM source WHERE id IN (SELECT id FROM sim);
 SQL
 fi
 
-# Set a top-level key in carchompd.toml unless the owner already has.
-set_key() {
-    grep -q "^$1 *=" "$config" && return
-    tmp=$(mktemp)
-    { printf '%s = %s\n' "$1" "$2"; sed "/^# *$1 *=/d" "$config"; } >"$tmp"
-    cat "$tmp" >"$config"
-    rm -f "$tmp"
-}
-
 if [ -n "$gps" ]; then
     step "GPS on $gps"
     # Opened at boot (-n), not only when a client connects: chrony needs it.
@@ -317,10 +438,22 @@ if [ -n "$ssid" ]; then
     printf 'set wifi-sec.psk %s\nsave persistent\nquit\n' "$psk" | nmcli connection edit carchomp-hotspot-new >/dev/null
     nmcli connection delete carchomp-hotspot >/dev/null 2>&1 || true
     nmcli connection modify carchomp-hotspot-new connection.id carchomp-hotspot
+fi
+if have_systemd && nmcli general status >/dev/null 2>&1; then
+    # NetworkManager stops trying a network after 4 failures, for good: in a
+    # moving car, keep trying (not the hotspot, which carchomp-wifi starts).
+    nmcli -g UUID,TYPE connection show | sed -n 's/:802-11-wireless$//p' | while IFS= read -r uuid; do
+        [ "$(nmcli -g 802-11-wireless.mode connection show "$uuid")" = ap ] ||
+            nmcli connection modify "$uuid" connection.autoconnect-retries 0 || true
+    done
+fi
+wifi_timer=/etc/systemd/system/carchomp-wifi.timer
+if [ -n "$ssid" ] || [ -f "$wifi_timer" ]; then
+    # Rewritten by every run, --reuse too; the hotspot profile stays as it is.
     cat >/usr/local/sbin/carchomp-wifi <<'SH'
 #!/bin/sh
 # Join a known Wi-Fi network in range, else host carchomp-hotspot.
-# Run every two minutes by carchomp-wifi.timer; installed by deploy/install.sh.
+# Run every 30 seconds by carchomp-wifi.timer; installed by deploy/install.sh.
 dev=wlan0 ap=carchomp-hotspot
 case $(nmcli -g GENERAL.STATE device show $dev) in
     100*) [ "$(nmcli -g GENERAL.CONNECTION device show $dev)" = $ap ] || exit 0
@@ -348,18 +481,20 @@ After=NetworkManager.service
 Type=oneshot
 ExecStart=/usr/local/sbin/carchomp-wifi
 UNIT
-    cat >/etc/systemd/system/carchomp-wifi.timer <<'UNIT'
+    cat >"$wifi_timer" <<'UNIT'
 [Unit]
 Description=CarChomp Wi-Fi fallback check
 
 [Timer]
 OnBootSec=45s
-OnUnitActiveSec=2min
+OnUnitActiveSec=30s
 
 [Install]
 WantedBy=timers.target
 UNIT
-    if have_systemd; then systemctl daemon-reload && systemctl enable --now carchomp-wifi.timer; fi
+    if have_systemd; then systemctl daemon-reload && systemctl enable carchomp-wifi.timer && systemctl restart carchomp-wifi.timer; fi
+fi
+if [ -n "$ssid" ]; then
     # Unblocking takes a moment to show.
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         case $(nmcli -g GENERAL.STATE device show wlan0 2>/dev/null) in "" | 10* | 20*) sleep 1 ;; *) break ;; esac
@@ -367,6 +502,18 @@ UNIT
     case $(nmcli -g GENERAL.STATE device show wlan0 2>/dev/null) in
         "" | 10* | 20*) echo "wlan0 is unavailable (rfkill, country, driver?); the hotspot cannot come up" >&2; exit 1 ;;
     esac
+fi
+
+step "mDNS: $(hostname).local on the hotspot and admin networks only"
+avahi_hook=/etc/NetworkManager/dispatcher.d/50-carchomp-avahi
+if [ -d /etc/NetworkManager ]; then
+    mkdir -p "${avahi_hook%/*}"
+    install -m 755 "$root/deploy/carchomp-avahi.sh" "$avahi_hook"
+    # The hook starts avahi when a network comes up; at boot it would
+    # announce the name before anyone knows which network this is.
+    if command -v systemctl >/dev/null; then systemctl disable avahi-daemon.service avahi-daemon.socket; fi
+else
+    echo "warning: no NetworkManager; avahi announces $(hostname).local on every network" >&2
 fi
 
 if [ -n "$kiosk_user" ]; then
@@ -390,12 +537,19 @@ KIOSK_USER='$kiosk_user'
 DEMO='$demo'
 RADIO='$radio'
 GPS_DEVICE='$gps'
+ADMIN_NETS='$admin_nets'
 ENV
+# Now that install.env names the admin networks: avahi on or off.
+if have_systemd && [ -x "$avahi_hook" ]; then "$avahi_hook"; fi
 
 if have_systemd; then
-    echo "carchomp is running: http://$(hostname).local/ or http://$(hostname -I | cut -d' ' -f1)/"
-    [ -z "$ssid" ] || echo "on the $ssid hotspot: http://10.42.0.1/"
-    echo "It answers only this device and its hotspot; add other networks to trusted_networks in /etc/carchomp/carchompd.toml."
+    echo "carchomp is running: http://localhost/ on this device"
+    [ -z "$ssid" ] || echo "on the $ssid hotspot: http://10.42.0.1/ or http://$(hostname).local/"
+    if [ -n "$admin_nets" ]; then
+        echo "from $admin_nets: http://$(hostname).local/ or http://$(hostname -I | cut -d' ' -f1)/"
+    else
+        echo "Other networks reach only SSH; to serve the web UI to one, run this again with --admin-net CIDR."
+    fi
 else
     [ -z "$demo" ] || echo "no systemd here; start the simulator with: /usr/local/bin/carchomp-sim --gpsd 12947 --kiss 18001 &"
     echo "no systemd here; start carchompd with: setcap cap_net_bind_service=+ep /usr/local/bin/carchompd && su carchomp -s /bin/sh -c '/usr/local/bin/carchompd /etc/carchomp/$([ -n "$demo" ] && echo demo || echo carchompd).toml'"
