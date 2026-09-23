@@ -33,18 +33,44 @@
     : ['', 'Parked'],
   );
 
+  // Entering a new road: the badge pulses (CSS, on gaining the class) and a
+  // short rising chirp plays. The browser keeps audio suspended until the
+  // screen has been touched once, so the first touch resumes it.
+  const audio = window.AudioContext ? new AudioContext() : null;
+  let wasNew = false;
+  $effect(() => {
+    const isNew = road[0] === 'new';
+    if (isNew && !wasNew && ui.chirp && audio) {
+      const t = audio.currentTime;
+      const tone = audio.createOscillator();
+      const gain = audio.createGain();
+      tone.frequency.setValueAtTime(880, t);
+      tone.frequency.exponentialRampToValueAtTime(1760, t + 0.15);
+      gain.gain.setValueAtTime(0.3, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+      tone.connect(gain).connect(audio.destination);
+      tone.start(t);
+      tone.stop(t + 0.25);
+    }
+    wasNew = isNew;
+  });
+
   const toggle = (panel) => (ui.panel = ui.panel === panel ? null : panel);
 
   // The reTerminal's front buttons F1, F2, F3 and O arrive as these keys.
   const buttons = { a: () => toggle('aprs'), s: () => toggle('tracks'), d: () => toggle('maps'), f: () => ((ui.panel = null), (ui.follow = true)) };
   const pressed = (event) => event.target.tagName !== 'INPUT' && buttons[event.key]?.();
   $effect(() => {
-    localStorage.aprs = ui.aprs;
-    localStorage.metric = ui.metric;
+    const settings = { aprs: ui.aprs, metric: ui.metric, chirp: ui.chirp };
+    try {
+      Object.assign(localStorage, settings);
+    } catch {
+      // not remembered, see stored()
+    }
   });
 </script>
 
-<svelte:window onkeydown={pressed} />
+<svelte:window onkeydown={pressed} onpointerdown={() => audio?.state === 'suspended' && audio.resume()} />
 
 <Map />
 
@@ -88,6 +114,13 @@
   }
   .road.new {
     background: var(--new);
+    animation: pulse 1s ease-in-out 3;
+  }
+  @keyframes pulse {
+    50% {
+      transform: scale(1.12);
+      box-shadow: 0 0 0 10px color-mix(in srgb, var(--new) 40%, transparent);
+    }
   }
   .road.offline {
     background: #b91c1c;
