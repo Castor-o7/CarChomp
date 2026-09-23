@@ -44,8 +44,8 @@ impl Kind {
 pub struct Packet {
     /// Sending station with SSID, e.g. `N0CALL-9`.
     pub from: String,
-    /// True if no digipeater relayed this: we heard the sender itself, so it
-    /// is within radio range of us.
+    /// True if no digipeater or igate relayed this: we heard the sender
+    /// itself, so it is within radio range of us.
     pub direct: bool,
     /// The whole packet in TNC2 form, `FROM>TO,PATH:info`.
     pub raw: String,
@@ -109,20 +109,23 @@ pub fn parse_frame(frame: &[u8]) -> Option<Packet> {
         }
         addrs.push(call);
         rest = tail;
-        if addr[6] & 1 == 1 {
-            break;
-        }
         if addrs.len() > 10 {
             return None;
         }
+        if addr[6] & 1 == 1 {
+            break;
+        }
     }
-    // Control 0x03 (UI), PID 0xF0 (no layer 3).
-    let ([to, from, path @ ..], [0x03, 0xF0, info @ ..]) = (&addrs[..], rest) else {
+    // Control 0x03 (UI; some TNCs set the poll/final bit, 0x10), PID 0xF0 (no layer 3).
+    let ([to, from, path @ ..], [control, 0xF0, info @ ..]) = (&addrs[..], rest) else {
         return None;
     };
+    if control & 0xEF != 0x03 {
+        return None;
+    }
     let header = [&[format!("{from}>{to}")], path].concat().join(",");
     let mut packet = parse_info(from, to, info);
-    packet.direct = direct;
+    packet.direct &= direct;
     packet.raw = format!("{header}:{}", text(info));
     Some(packet)
 }
@@ -207,6 +210,18 @@ fn fill(p: &mut Packet, to: &str, info: &[u8]) -> Option<()> {
             p.text = text(body);
             Some(())
         }
+        // }FROM>TO,PATH:info   relayed from another network by an igate, which
+        // is how weather-service alerts reach RF. The sender was not heard.
+        b'}' => {
+            let colon = body.iter().position(|&b| b == b':')?;
+            let header = text(&body[..colon]);
+            let (from, to) = header.split_once('>')?;
+            if from.is_empty() || !from.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+                return None;
+            }
+            *p = Packet { direct: false, ..parse_info(from, to.split(',').next()?, &body[colon + 1..]) };
+            Some(())
+        }
         _ => None,
     }
 }
@@ -231,7 +246,7 @@ fn located(p: &mut Packet, mut at: Located) -> Option<()> {
         let speed = at.number.map(|n| n * MPH).or(at.position.speed);
         let wind = at.position.course.zip(speed);
         (at.position.course, at.position.speed) = (None, None);
-        let (weather, comment) = weather(at.rest, wind);
+        let (weather, comment) = weather(at.rest, Some(wind));
         p.kind = Kind::Weather;
         p.weather = Some(weather);
         at.rest = comment;
@@ -266,9 +281,13 @@ fn uncompressed(b: &[u8]) -> Option<Located<'_>> {
     let lon = dm(&b[9..12], &b[12..17])? * hemisphere(b[17], b'E', b'W')?;
     let mut rest = &b[19..];
     let (mut course, mut number) = (None, None);
-    if let [c @ .., b'/', s1, s2, s3] = rest.get(..7).unwrap_or(&[]) {
-        if let (Some(c), Some(s)) = (number_in(c), number_in(&[*s1, *s2, *s3])) {
-            (course, number) = (Some(c), Some(s));
+    // Either half may be unknown, sent as dots or spaces.
+    let field = |d: &[u8]| {
+        if d.iter().all(|&b| b == b'.' || b == b' ') { Some(None) } else { number_in(d).map(Some) }
+    };
+    if let [c1, c2, c3, b'/', s1, s2, s3] = rest.get(..7).unwrap_or(&[]) {
+        if let (Some(c), Some(s)) = (field(&[*c1, *c2, *c3]), field(&[*s1, *s2, *s3])) {
+            (course, number) = (c, s);
             rest = &rest[7..];
         }
     }
@@ -278,13 +297,16 @@ fn uncompressed(b: &[u8]) -> Option<Located<'_>> {
 
 /// `/YYYYXXXX$csT`: base-91 latitude and longitude.
 fn compressed(b: &[u8]) -> Option<Located<'_>> {
-    if b.len() < 13 {
+    if b.len() < 13 || !matches!(b[0], b'/' | b'\\' | b'A'..=b'Z' | b'a'..=b'j') {
         return None;
     }
     let lat = 90.0 - base91(&b[1..5])? / 380_926.0;
     let lon = -180.0 + base91(&b[5..9])? / 190_463.0;
     let (c, s) = (b[10], b[11]);
-    let (course, speed) = if (b'!'..=b'z').contains(&c) && s >= b'!' {
+    // What `cs` means depends on T: with a GGA source (bits 3-4) it is an
+    // altitude, and `{` makes it a radio range; neither is a course and speed.
+    let altitude = b[12].checked_sub(33).is_some_and(|t| (t >> 3) & 3 == 2);
+    let (course, speed) = if (b'!'..=b'z').contains(&c) && s >= b'!' && !altitude {
         let knots = 1.08f64.powi((s - 33) as i32) - 1.0;
         (Some((c - 33) as f64 * 4.0), Some(knots * KNOT))
     } else {
@@ -345,10 +367,12 @@ fn mic_e<'a>(to: &[u8], b: &'a [u8]) -> Option<Located<'a>> {
 
 /// Weather fields are a run of `<letter><digits>` with fixed widths, e.g.
 /// `g005t077r000h50b09900`. Returns the report and the unparsed remainder
-/// (usually the station's software type). `wind` is direction and speed when
-/// the position already supplied them.
-fn weather(mut b: &[u8], wind: Option<(f64, f64)>) -> (Weather, &[u8]) {
-    let mut w = Weather { wind_dir: wind.map(|w| w.0), wind_speed: wind.map(|w| w.1), ..Weather::default() };
+/// (usually the station's software type). `wind` is `Some` when a position
+/// came first: it carried the direction and speed (if known), and `s` here is
+/// snowfall instead.
+fn weather(mut b: &[u8], wind: Option<Option<(f64, f64)>>) -> (Weather, &[u8]) {
+    let (wind_dir, wind_speed) = wind.flatten().unzip();
+    let mut w = Weather { wind_dir, wind_speed, ..Weather::default() };
     while let Some((&key, rest)) = b.split_first() {
         let width = match key {
             b'c' | b's' | b'g' | b't' | b'r' | b'p' | b'P' | b'L' | b'l' | b'#' => 3,
@@ -364,7 +388,7 @@ fn weather(mut b: &[u8], wind: Option<(f64, f64)>) -> (Weather, &[u8]) {
         }
         match key {
             b'c' => w.wind_dir = value,
-            b's' => w.wind_speed = value.map(|v| v * MPH),
+            b's' if wind.is_none() => w.wind_speed = value.map(|v| v * MPH),
             b'g' => w.gust = value.map(|v| v * MPH),
             b't' => w.temp_c = value.map(|f| (f - 32.0) / 1.8),
             b'r' => w.rain_1h_mm = value.map(|v| v * 0.254),
@@ -456,6 +480,38 @@ mod tests {
     }
 
     #[test]
+    fn compressed_without_course_or_with_altitude() {
+        // c = space: no course/speed. c = `{`: radio range.
+        for info in [&b"=/5L!!<*e7> sT"[..], b"=/5L!!<*e7>{?!"] {
+            let pos = parse("APRS", info).position.unwrap();
+            assert!(close(pos.lat, 49.5) && close(pos.lon, -72.75));
+            assert_eq!((pos.course, pos.speed), (None, None), "{info:?}");
+        }
+        // T = '1' says the fix came from GGA, so `S]` is an altitude.
+        let pos = parse("APRS", b"=/5L!!<*e7>S]1").position.unwrap();
+        assert_eq!((pos.course, pos.speed), (None, None));
+    }
+
+    #[test]
+    fn compressed_rejects_what_is_not_a_position() {
+        // An Ultimeter `!!` log line, and a byte outside base-91.
+        for junk in [&b"!!000B00490000001300000000000000000000000000"[..], b"=/5L!|<*e7>7P["] {
+            let p = parse("APRS", junk);
+            assert_eq!((p.kind, p.position), (Kind::Other, None), "{junk:?}");
+        }
+    }
+
+    #[test]
+    fn mic_e_south_east_and_small_longitudes() {
+        // Destination 332564: south, no +100 offset, east; 72 07.74' (no minute wrap).
+        let pos = parse("332564", b"`d#fn\"Oj/").position.unwrap();
+        assert!(close(pos.lat, -(33.0 + 25.64 / 60.0)) && close(pos.lon, 72.0 + 7.74 / 60.0));
+        // 5 degrees is sent with the offset flag and wraps from 195.
+        let pos = parse("S32UVT", b"`{#fn\"Oj/").position.unwrap();
+        assert!(close(pos.lon, -(5.0 + 7.74 / 60.0)));
+    }
+
+    #[test]
     fn mic_e() {
         // Destination S32UVT: 33 25.64' N, +100 longitude offset, west.
         // Info (_f: 112 07.74' W. "n"O: 20 knots, course 251.
@@ -476,6 +532,23 @@ mod tests {
         assert!(close(w.wind_speed.unwrap(), 4.0 * MPH) && close(w.gust.unwrap(), 5.0 * MPH) && close(w.temp_c.unwrap(), 25.0));
         let pos = p.position.unwrap();
         assert_eq!((pos.speed, pos.course), (None, None));
+    }
+
+    #[test]
+    fn weather_station_without_wind_sensor() {
+        for info in [&b"!4903.50N/07201.75W_.../...g...t054r000p000h72b10132"[..], b"@171800z4903.50N/07201.75W_   /   g...t054h72b10132"] {
+            let p = parse("APRS", info);
+            let w = p.weather.unwrap();
+            assert_eq!((w.wind_dir, w.wind_speed, w.humidity, w.pressure_hpa), (None, None, Some(72.0), Some(1013.2)), "{info:?}");
+            assert!(close(w.temp_c.unwrap(), 12.222_2));
+            assert_eq!(p.text, "");
+        }
+    }
+
+    #[test]
+    fn snowfall_after_a_position_is_not_wind() {
+        let w = parse("APRS", b"!4903.50N/07201.75W_220/004g005t028r000p000h90b10132s012").weather.unwrap();
+        assert!(close(w.wind_speed.unwrap(), 4.0 * MPH));
     }
 
     #[test]
@@ -509,6 +582,14 @@ mod tests {
     }
 
     #[test]
+    fn third_party_bulletin() {
+        let p = parse("APRS", b"}NWSPQR>APRS,TCPIP*,qAC,T2ONTARIO::NWS-WARN :Red flag warning until 8PM PDT{a1");
+        assert_eq!((p.kind, p.from.as_str(), p.direct), (Kind::Message, "NWSPQR", false));
+        assert_eq!((p.addressee.as_deref(), p.text.as_str()), (Some("NWS-WARN"), "Red flag warning until 8PM PDT"));
+        assert_eq!(parse("APRS", b"}no header here").kind, Kind::Other);
+    }
+
+    #[test]
     fn status_and_garbage() {
         let status = parse("APRS", b">On the road");
         assert_eq!((status.kind, status.text.as_str()), (Kind::Status, "On the road"));
@@ -537,5 +618,28 @@ mod tests {
         let relayed = parse_frame(&frame(true)).unwrap();
         assert_eq!((relayed.direct, relayed.raw.split(':').next()), (false, Some("N0CALL-9>APRS,WIDE1-1*")));
         assert!(parse_frame(&frame(false)[..10]).is_none());
+
+        // UI with the poll/final bit set.
+        let mut pf = frame(false);
+        pf[21] = 0x13;
+        assert!(parse_frame(&pf).unwrap().position.is_some());
+
+        // Mic-E destination with an SSID.
+        let mut mic = [addr("S32UVT", 1, false, false), addr("N0CALL", 9, false, true)].concat();
+        mic.extend_from_slice(b"\x03\xF0`(_fn\"Oj/]hi");
+        let p = parse_frame(&mic).unwrap();
+        assert!(close(p.position.unwrap().lat, 33.0 + 25.64 / 60.0));
+
+        // Third party: relayed by the igate we heard, so not direct.
+        let mut tp = [addr("APRS", 0, false, false), addr("KF7XYZ", 10, false, true)].concat();
+        tp.extend_from_slice(b"\x03\xF0}NWSPQR>APRS,TCPIP*::NWS-WARN :Red flag");
+        let p = parse_frame(&tp).unwrap();
+        assert_eq!((p.from.as_str(), p.direct, p.kind), ("NWSPQR", false, Kind::Message));
+        assert!(p.raw.starts_with("KF7XYZ-10>APRS:}NWSPQR"));
+
+        // More than ten addresses (two plus eight digipeaters) is not AX.25.
+        let mut long: Vec<u8> = (0..11).flat_map(|i| addr("WIDE1", 1, false, i == 10)).collect();
+        long.extend_from_slice(b"\x03\xF0>hi");
+        assert!(parse_frame(&long).is_none());
     }
 }
