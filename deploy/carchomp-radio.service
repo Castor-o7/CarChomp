@@ -1,0 +1,14 @@
+[Unit]
+Description=CarChomp APRS receiver: rtl_fm into Direwolf, receive only
+Before=carchompd.service
+
+[Service]
+DynamicUser=yes
+# The RTL-SDR's udev rule gives plugdev the dongle.
+SupplementaryGroups=plugdev
+ExecStart=/bin/sh -c 'rtl_fm -f 144.39M -s 24000 - | direwolf -c /etc/carchomp/direwolf.conf -r 24000 -D 1 -'
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -2,36 +2,87 @@
 # Install carchomp on Raspberry Pi OS or Debian (bookworm or newer).
 # Run as root from a checkout or release bundle:
 #
-#   sudo deploy/install.sh [--kiosk USER] [--hotspot SSID PASSPHRASE] [--demo]
+#   sudo deploy/install.sh [--kiosk USER] [--hotspot SSID] [--gps DEVICE] [--radio] [--demo]
+#   sudo deploy/install.sh --reuse
 #
 #   --kiosk USER     open the UI full-screen when USER's desktop session starts
-#   --hotspot ...    become a Wi-Fi access point whenever no known network is
-#                    in range, so the web UI is always reachable
+#   --hotspot SSID   become a Wi-Fi access point whenever no known network is
+#                    in range, so the web UI is always reachable. Asks for the
+#                    passphrase, or reads one line from standard input (or
+#                    $CARCHOMP_HOTSPOT_PSK), never from the command line.
+#   --gps DEVICE     a GPS receiver on DEVICE (/dev/ttyACM0, /dev/serial0):
+#                    gpsd reads it from boot and chrony takes the time from it
+#   --radio          an RTL-SDR dongle: receive APRS on 144.39 MHz with rtl_fm
+#                    and Direwolf (receive only) and feed it to carchompd
 #   --demo           no GPS or radio yet: run a simulator in their place, so
 #                    everything else can be used and tested on the device.
 #                    Run again without --demo once the hardware is there; that
 #                    deletes what the simulator recorded.
+#   --reuse          run with the options of the last install (from
+#                    /etc/carchomp/install.env), leaving the hotspot as it is;
+#                    this is what an update from the web UI does
 #
 # Safe to run again: it upgrades in place and keeps data and configuration.
 set -eu
 
-kiosk_user="" ssid="" psk="" demo=""
+kiosk_user="" ssid="" psk="" demo="" gps="" radio="" reuse="" nargs=$#
 while [ $# -gt 0 ]; do
     case $1 in
         --kiosk) kiosk_user=$2; shift 2 ;;
-        --hotspot) ssid=$2 psk=$3; shift 3 ;;
+        --hotspot) ssid=$2; shift 2 ;;
+        --gps) gps=$2; shift 2 ;;
+        --radio) radio=yes; shift ;;
         --demo) demo=yes; shift ;;
+        --reuse) reuse=yes; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
+envfile=/etc/carchomp/install.env
+if [ -n "$reuse" ]; then
+    [ "$nargs" -eq 1 ] || { echo "--reuse takes no other options" >&2; exit 2; }
+    KIOSK_USER="" DEMO="" RADIO="" GPS_DEVICE=""
+    if [ -f "$envfile" ]; then
+        # shellcheck source=/dev/null
+        . "$envfile"
+    else
+        # Installed before install.env existed: read the options off the system.
+        [ ! -f /etc/systemd/system/carchomp-sim.service ] || DEMO=yes
+        for f in /root/.config/labwc/autostart /home/*/.config/labwc/autostart; do
+            if grep -qs 'http://localhost' "$f"; then KIOSK_USER=$(stat -c %U "$f"); break; fi
+        done
+    fi
+    kiosk_user=$KIOSK_USER demo=$DEMO radio=$RADIO gps=$GPS_DEVICE
+fi
 # Check the options before changing anything, so a typo cannot leave a half
 # upgraded system behind.
+if [ -n "$demo" ] && [ -n "$gps$radio" ]; then
+    echo "--demo simulates the GPS and the radio: use it without --gps and --radio" >&2; exit 2
+fi
+if [ -n "$gps" ]; then
+    case $gps in
+        /dev/*[!A-Za-z0-9/_.:-]* | /dev/) echo "--gps: not a device name: $gps" >&2; exit 2 ;;
+        /dev/*) [ -e "$gps" ] || echo "warning: $gps does not exist (yet); gpsd will use it once it does" >&2 ;;
+        *) echo "--gps: expected a device such as /dev/ttyACM0 or /dev/serial0" >&2; exit 2 ;;
+    esac
+fi
 if [ -n "$kiosk_user" ]; then
     home=$(getent passwd "$kiosk_user" | cut -d: -f6)
     [ -n "$home" ] || { echo "--kiosk: no such user: $kiosk_user" >&2; exit 2; }
 fi
 if [ -n "$ssid" ]; then
+    psk=${CARCHOMP_HOTSPOT_PSK-}
+    if [ -z "$psk" ] && [ -t 0 ]; then
+        printf 'Passphrase for the %s hotspot: ' "$ssid" >&2
+        trap 'stty echo; exit 130' INT HUP TERM
+        stty -echo
+        IFS= read -r psk || true
+        stty echo
+        trap - INT HUP TERM
+        echo >&2
+    elif [ -z "$psk" ]; then
+        IFS= read -r psk || true
+    fi
     case ${#psk} in
         8 | 9 | [1-5][0-9] | 6[0-3]) ;;
         64) case $psk in *[!0-9a-fA-F]*) echo "--hotspot: a 64-character passphrase must be hex" >&2; exit 2 ;; esac ;;
@@ -48,9 +99,23 @@ have_systemd() { [ -d /run/systemd/system ]; }
 
 step "Packages"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -q
-apt-get install -qy --no-install-recommends postgresql postgresql-postgis gpsd ca-certificates curl git unzip avahi-daemon \
-    $([ -n "$ssid" ] && echo network-manager iw rfkill)
+pkgs="postgresql postgresql-postgis gpsd chrony ca-certificates curl git unzip avahi-daemon"
+[ -z "$ssid" ] || pkgs="$pkgs network-manager iw rfkill"
+[ -z "$radio" ] || pkgs="$pkgs rtl-sdr direwolf"
+[ -z "$demo" ] || pkgs="$pkgs python3"
+# Only go online when something is missing: a car is usually on its own
+# hotspot, and an upgrade from a bundle must work there.
+missing=""
+for p in $pkgs; do
+    dpkg-query -W -f '${Status}' "$p" 2>/dev/null | grep -q ' installed$' || missing="$missing $p"
+done
+if [ -n "$missing" ]; then
+    apt-get update -q
+    # shellcheck disable=SC2086 # a list of names
+    apt-get install -qy --no-install-recommends $pkgs
+else
+    echo "all installed"
+fi
 
 step "carchompd"
 if [ -f "$root/Cargo.toml" ]; then
@@ -120,7 +185,7 @@ fi
 
 step "User, directories, configuration"
 id carchomp >/dev/null 2>&1 || useradd --system --home-dir /var/lib/carchomp --shell /usr/sbin/nologin carchomp
-mkdir -p /var/lib/carchomp/maps /etc/carchomp
+mkdir -p /var/lib/carchomp/maps /var/lib/carchomp/update /etc/carchomp
 [ -f /etc/carchomp/carchompd.toml ] || install -m 644 "$root/deploy/carchompd.toml" /etc/carchomp/carchompd.toml
 [ -d /var/lib/carchomp/maps/assets ] || "$root/tools/fetch_map_assets.sh" /var/lib/carchomp/maps
 chown -R carchomp: /var/lib/carchomp
@@ -133,16 +198,26 @@ as_postgres() { su postgres -c "psql -qtAX $1"; }
 # Extensions need a superuser; everything else is carchompd's own migrations.
 as_postgres "-d carchomp -c 'CREATE EXTENSION IF NOT EXISTS postgis'"
 
-step "Wi-Fi permissions"
-# Let the daemon (and nobody else new) manage networks from the web UI.
+step "Permissions, updates from the web UI"
+# Let the daemon (and nobody else new) manage networks and start the updater
+# from the web UI; nothing else.
 mkdir -p /etc/polkit-1/rules.d
 cat >/etc/polkit-1/rules.d/50-carchomp.rules <<'RULES'
 polkit.addRule(function (action, subject) {
     if (subject.user == "carchomp" && action.id.indexOf("org.freedesktop.NetworkManager.") == 0) {
         return polkit.Result.YES;
     }
+    if (subject.user == "carchomp" && action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "carchomp-update.service" && action.lookup("verb") == "start") {
+        return polkit.Result.YES;
+    }
 });
 RULES
+# Replaced, not overwritten: an update runs this installer from update.sh.
+mkdir -p /usr/local/lib/carchomp
+install -m 755 "$root/deploy/update.sh" /usr/local/lib/carchomp/update.sh.new
+mv -f /usr/local/lib/carchomp/update.sh.new /usr/local/lib/carchomp/update.sh
+install -m 644 "$root/deploy/carchomp-update.service" /etc/systemd/system/carchomp-update.service
 
 step "Sensors: $([ -n "$demo" ] && echo simulated || echo real)"
 # The simulator listens away from the real gpsd (2947) and Direwolf (8001).
@@ -150,7 +225,6 @@ step "Sensors: $([ -n "$demo" ] && echo simulated || echo real)"
 # real one is never edited.
 config=/etc/carchomp/carchompd.toml dropin=/etc/systemd/system/carchompd.service.d/demo.conf
 if [ -n "$demo" ]; then
-    apt-get install -qy --no-install-recommends python3
     install -m 755 "$root/tools/sim.py" /usr/local/bin/carchomp-sim
     install -m 644 "$root/deploy/carchomp-sim.service" /etc/systemd/system/carchomp-sim.service
     { printf 'gpsd = "127.0.0.1:12947"\naprs_kiss = "127.0.0.1:18001"\n'; sed -e '/^#* *gpsd = /d' -e '/^#* *aprs_kiss = /d' "$config"; } >/etc/carchomp/demo.toml
@@ -175,6 +249,50 @@ DELETE FROM source WHERE id IN (SELECT id FROM sim);
 SQL
 fi
 
+# Set a top-level key in carchompd.toml unless the owner already has.
+set_key() {
+    grep -q "^$1 *=" "$config" && return
+    tmp=$(mktemp)
+    { printf '%s = %s\n' "$1" "$2"; sed "/^# *$1 *=/d" "$config"; } >"$tmp"
+    cat "$tmp" >"$config"
+    rm -f "$tmp"
+}
+
+if [ -n "$gps" ]; then
+    step "GPS on $gps"
+    # Opened at boot (-n), not only when a client connects: chrony needs it.
+    printf '# Written by deploy/install.sh --gps; run it again to change.\nDEVICES="%s"\nGPSD_OPTIONS="-n"\nUSBAUTO="true"\n' "$gps" >/etc/default/gpsd
+    set_key gpsd '"127.0.0.1:2947"'
+    if have_systemd; then systemctl enable gpsd.service gpsd.socket && systemctl restart gpsd.service; fi
+fi
+
+step "Time from GPS"
+# No RTC and often no network: chrony takes the time gpsd shares (segment 0)
+# and may step the clock at any time, since it is wrong at every boot.
+mkdir -p /etc/chrony/conf.d
+cat >/etc/chrony/conf.d/carchomp-gps.conf <<'CONF'
+# Written by deploy/install.sh: time from gpsd; the network pools still apply.
+refclock SHM 0 refid GPS precision 1e-1 offset 0.0 delay 0.2
+makestep 1 -1
+CONF
+# Debian's own makestep (first three updates only) comes later and would win.
+sed -i 's/^makestep /#&/' /etc/chrony/chrony.conf
+if have_systemd; then systemctl restart chrony; fi
+
+radio_unit=/etc/systemd/system/carchomp-radio.service
+if [ -n "$radio" ]; then
+    step "Radio: APRS receive only"
+    install -m 644 "$root/deploy/direwolf.conf" /etc/carchomp/direwolf.conf
+    install -m 644 "$root/deploy/carchomp-radio.service" "$radio_unit"
+    # The kernel's DVB-T driver would claim the dongle first (from next boot).
+    echo 'blacklist dvb_usb_rtl28xxu' >/etc/modprobe.d/carchomp-rtl-sdr.conf
+    set_key aprs_kiss '"127.0.0.1:8001"'
+    if have_systemd; then systemctl daemon-reload && systemctl enable carchomp-radio && systemctl restart carchomp-radio; fi
+elif [ -f "$radio_unit" ]; then
+    if have_systemd; then systemctl disable --now carchomp-radio; fi
+    rm -f "$radio_unit" /etc/carchomp/direwolf.conf /etc/modprobe.d/carchomp-rtl-sdr.conf
+fi
+
 step "Service"
 install -m 644 "$root/deploy/carchompd.service" /etc/systemd/system/carchompd.service
 if have_systemd; then
@@ -194,7 +312,9 @@ if [ -n "$ssid" ]; then
     nmcli connection delete carchomp-hotspot-new >/dev/null 2>&1 || true
     nmcli connection add type wifi ifname wlan0 con-name carchomp-hotspot-new \
         autoconnect no ssid "$ssid" mode ap ipv4.method shared ipv4.addresses 10.42.0.1/24 \
-        wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$psk" >/dev/null
+        wifi-sec.key-mgmt wpa-psk >/dev/null
+    # The key goes in over standard input (printf is a builtin), never argv.
+    printf 'set wifi-sec.psk %s\nsave persistent\nquit\n' "$psk" | nmcli connection edit carchomp-hotspot-new >/dev/null
     nmcli connection delete carchomp-hotspot >/dev/null 2>&1 || true
     nmcli connection modify carchomp-hotspot-new connection.id carchomp-hotspot
     cat >/usr/local/sbin/carchomp-wifi <<'SH'
@@ -251,19 +371,31 @@ fi
 
 if [ -n "$kiosk_user" ]; then
     step "Kiosk"
-    # Raspberry Pi OS desktop (labwc): run a full-screen browser at login, once
-    # carchompd answers; Chromium's error page would never retry by itself.
-    mkdir -p "$home/.config/labwc"
+    # Raspberry Pi OS desktop (labwc): run a full-screen browser at login.
+    mkdir -p /usr/local/lib/carchomp "$home/.config/labwc"
+    install -m 755 "$root/deploy/kiosk.sh" /usr/local/lib/carchomp/kiosk.sh
     autostart=$home/.config/labwc/autostart
-    line="sh -c 'until curl -sf http://localhost/api/health >/dev/null; do sleep 1; done; exec chromium http://localhost --kiosk --password-store=basic --noerrdialogs --disable-infobars --no-first-run --enable-features=OverlayScrollbar' &"
-    [ ! -f "$autostart" ] || sed -i '\|chromium http://localhost --kiosk|d' "$autostart"
-    echo "$line" >>"$autostart"
+    # Older installers put the whole command line in the autostart file.
+    [ ! -f "$autostart" ] || sed -i -e '\|chromium http://localhost --kiosk|d' -e '\|/usr/local/lib/carchomp/kiosk.sh|d' "$autostart"
+    echo "sh /usr/local/lib/carchomp/kiosk.sh &" >>"$autostart"
+    # mkdir may just have created ~/.config itself, as root.
+    chown "$kiosk_user": "$home/.config"
     chown -R "$kiosk_user": "$home/.config/labwc"
 fi
+
+# What --reuse (and so an update from the web UI) runs with next time.
+cat >"$envfile" <<ENV
+# The options deploy/install.sh last ran with; --reuse runs it with them again.
+KIOSK_USER='$kiosk_user'
+DEMO='$demo'
+RADIO='$radio'
+GPS_DEVICE='$gps'
+ENV
 
 if have_systemd; then
     echo "carchomp is running: http://$(hostname).local/ or http://$(hostname -I | cut -d' ' -f1)/"
     [ -z "$ssid" ] || echo "on the $ssid hotspot: http://10.42.0.1/"
+    echo "It answers only this device and its hotspot; add other networks to trusted_networks in /etc/carchomp/carchompd.toml."
 else
     [ -z "$demo" ] || echo "no systemd here; start the simulator with: /usr/local/bin/carchomp-sim --gpsd 12947 --kiss 18001 &"
     echo "no systemd here; start carchompd with: setcap cap_net_bind_service=+ep /usr/local/bin/carchompd && su carchomp -s /bin/sh -c '/usr/local/bin/carchompd /etc/carchomp/$([ -n "$demo" ] && echo demo || echo carchompd).toml'"

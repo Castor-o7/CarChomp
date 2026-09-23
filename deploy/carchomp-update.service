@@ -1,0 +1,10 @@
+[Unit]
+Description=CarChomp: install the release bundle uploaded from the web UI
+# Not enabled: carchompd starts it (allowed by the polkit rule that
+# deploy/install.sh writes). It restarts carchompd itself.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/carchomp/update.sh
+ExecStopPost=/usr/local/lib/carchomp/update.sh --stopped
+TimeoutStartSec=1h

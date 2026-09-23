@@ -7,3 +7,8 @@ ui_dir = "/usr/share/carchomp/ui"
 maps_dir = "/var/lib/carchomp/maps"
 gpsd = "127.0.0.1:2947"
 # aprs_kiss = "127.0.0.1:8001"
+
+# Only this device and its hotspot (10.42.0.0/24) may use the web UI. To also
+# allow e.g. your home network (anyone on it can manage Wi-Fi and install
+# updates):
+# trusted_networks = ["10.42.0.0/24", "192.168.1.0/24"]
