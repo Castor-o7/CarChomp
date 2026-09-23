@@ -5,6 +5,9 @@ Wants=postgresql.service
 
 [Service]
 User=carchomp
+# As root (+), never fatal (-): an update cut short by a power cut would
+# otherwise block new ones (update.sh --stopped marks it failed).
+ExecStartPre=-+/usr/local/lib/carchomp/update.sh --stopped
 ExecStart=/usr/local/bin/carchompd /etc/carchomp/carchompd.toml
 Restart=always
 RestartSec=2

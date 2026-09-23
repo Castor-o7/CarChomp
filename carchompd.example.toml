@@ -5,7 +5,12 @@ database_url = "postgres://carchomp@localhost/carchomp"
 listen = "0.0.0.0:8000"
 # 8000 is also Direwolf's default AGW port. On a host that runs both, set
 # `AGWPORT 0` in direwolf.conf or listen on another port.
-# ui_dir = "/usr/share/carchomp/ui"
+ui_dir = "/usr/share/carchomp/ui"   # default: none (no web UI is served)
+
+# Who may use the web UI and the API: these networks (CIDR) plus this machine
+# (loopback), always. Anyone else gets 403. The default is the hotspot's
+# subnet; add e.g. "192.168.1.0/24" to allow your home network.
+trusted_networks = ["10.42.0.0/24"]
 
 # Offline maps: *.pmtiles regions, plus assets/ (fonts, sprites; see
 # tools/fetch_map_assets.sh). Downloading regions needs the `pmtiles` CLI.
