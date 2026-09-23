@@ -53,7 +53,7 @@
 
 <dl>
   <dt>Daemon</dt>
-  <dd>{live.connected ? `connected · v${health?.version ?? '?'}` : 'unreachable'}</dd>
+  <dd>{live.connected ? `connected · ${health?.version ?? '?'}` : 'unreachable'}</dd>
   <dt>GPS</dt>
   <dd>
     {#if fix}
