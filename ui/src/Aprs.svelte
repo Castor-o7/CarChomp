@@ -10,7 +10,10 @@
     api('aprs/bulletins').then((b) => (bulletins = b), () => {});
   });
   $effect(() => {
-    api('aprs/stations').then((c) => (stored = c.features), () => {});
+    const refresh = () => api('aprs/stations').then((c) => (stored = c.features), () => {});
+    refresh();
+    const timer = setInterval(refresh, 60_000);
+    return () => clearInterval(timer);
   });
 
   // Objects are how incidents arrive: closures, fires, hazards. Live packets
@@ -22,7 +25,7 @@
   );
 
   const when = (time) => new Date(time).toLocaleTimeString([], { timeStyle: 'short' });
-  const show = (feature) => (ui.focus = { geometry: { coordinates: [feature.geometry.coordinates] } });
+  const show = (feature) => ((ui.aprs = true), (ui.focus = { geometry: { coordinates: [feature.geometry.coordinates] } }));
 </script>
 
 <button class:on={ui.aprs} onclick={() => (ui.aprs = !ui.aprs)}>Show on map</button>
