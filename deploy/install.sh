@@ -66,12 +66,13 @@ if [ -f "$root/Cargo.toml" ]; then
     fi
     cargo build --release --locked --manifest-path "$root/Cargo.toml" -p carchompd
 fi
-# Refuse a binary built for another machine (e.g. a synced target/ from a Mac).
-elf=$(od -An -tx1 -N20 "$root/target/release/carchompd" | tr -d ' \n')
-case "$(uname -m):$elf" in
-    x86_64:7f454c46*3e00 | aarch64:7f454c46*b700 | armv7l:7f454c46*2800 | armv6l:7f454c46*2800) ;;
-    *) echo "$root/target/release/carchompd is not a Linux $(uname -m) binary" >&2; exit 1 ;;
-esac
+# Refuse a binary built for another machine (e.g. a synced target/ from a Mac):
+# its ELF magic and e_machine must match the userland's (not uname -m, which
+# names the kernel: 32-bit Pi OS runs a 64-bit kernel).
+elf() { printf '%s%s' "$(od -An -tx1 -N4 "$1")" "$(od -An -tx1 -j18 -N2 "$1")"; }
+if [ "$(elf "$root/target/release/carchompd")" != "$(elf /bin/sh)" ]; then
+    echo "$root/target/release/carchompd was not built for this system" >&2; exit 1
+fi
 install -m 755 "$root/target/release/carchompd" /usr/local/bin/carchompd
 
 step "UI"
