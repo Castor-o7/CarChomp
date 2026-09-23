@@ -7,7 +7,6 @@ use crate::{Bus, Config, Event, Status};
 use carchomp_core::{
     Fix, Observation, aprs,
     beacon::{Params, SmartBeacon},
-    gpsd::Partials,
 };
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -66,7 +65,6 @@ struct Recorder {
     idle_deadline: Option<Instant>,
     /// Source of the latest fix, for storing the one the beacon skipped.
     last_source: Option<i16>,
-    partials: Partials,
 }
 
 /// Seconds between "known road?" checks, whether or not fixes are stored.
@@ -90,7 +88,6 @@ pub fn run(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Config)
         last_road_check: None,
         idle_deadline: None,
         last_source: None,
-        partials: Partials::default(),
     };
     async move {
         let mut events = rec.bus.subscribe();
@@ -124,9 +121,6 @@ pub fn run(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Config)
 
 impl Recorder {
     async fn fix(&mut self, source: i16, fix: &Fix) -> sqlx::Result<()> {
-        if self.partials.is_partial(fix) {
-            return Ok(());
-        }
         let moving = fix.speed.unwrap_or(0.0) >= self.params.low_speed;
         let idle = self
             .last_moving

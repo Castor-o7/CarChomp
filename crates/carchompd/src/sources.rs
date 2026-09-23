@@ -40,8 +40,10 @@ async fn gpsd_session(addr: &str, source: i16, bus: &Bus) -> io::Result<()> {
     let mut stream = BufReader::new(TcpStream::connect(addr).await?);
     stream.get_mut().write_all(gpsd::WATCH.as_bytes()).await?;
     let mut lines = stream.lines();
+    // Per connection: a new receiver may not report speed at all.
+    let mut partials = gpsd::Partials::default();
     while let Some(line) = within(GPSD_SILENCE, lines.next_line()).await? {
-        if let Some(fix) = gpsd::parse_fix(&line) {
+        if let Some(fix) = gpsd::parse_fix(&line).filter(|fix| !partials.is_partial(fix)) {
             publish(bus, source, Observation::Fix(fix));
         }
     }
