@@ -11,10 +11,12 @@ Conflicts=shutdown.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/sbin/nft -f /etc/carchomp/firewall.nft
+# Without the strict reverse-path rule where the kernel cannot do it (and
+# says so in the journal), rather than not at all.
+ExecStart=/usr/local/lib/carchomp/firewall-load.sh
 # A reload swaps the table in one transaction (the file deletes and remakes
 # it); a restart would leave input open between ExecStop and ExecStart.
-ExecReload=/usr/sbin/nft -f /etc/carchomp/firewall.nft
+ExecReload=/usr/local/lib/carchomp/firewall-load.sh
 ExecStop=/usr/sbin/nft delete table inet carchomp
 
 [Install]

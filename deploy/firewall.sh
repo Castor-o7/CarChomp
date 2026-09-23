@@ -32,6 +32,7 @@ table inet carchomp {
         # Strict reverse path: the rules below trust source addresses, so a
         # packet must come in on the interface its source is routed through.
         # Without this, anyone on a cafe network could claim 10.42.0.x.
+        # Needs nft_fib_inet: firewall-load.sh drops this line if it is missing.
         fib saddr . iif oif missing drop
         ip saddr 10.42.0.0/24 ip daddr 10.42.0.1 tcp dport { 22, 53, 80 } accept
         ip saddr 10.42.0.0/24 udp dport { 53, 67, 5353 } accept

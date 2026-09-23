@@ -73,8 +73,8 @@ the car's own hotspot.
 - `--demo` runs a simulator in place of the GPS and radio (below); it cannot
   be combined with `--gps` or `--radio`.
 - `--admin-net CIDR` also serves the web UI and the `.local` name to an IPv4
-  network, e.g. `--admin-net 192.168.1.0/24` for home; repeat it for more
-  (see *Who can use it*).
+  network, /16 or narrower, e.g. `--admin-net 192.168.77.0/24` for home;
+  repeat it for more (see *Who can use it*).
 - `--reuse` runs again with the options of the last install, recorded in
   `/etc/carchomp/install.env` (never the hotspot passphrase), and leaves the
   hotspot as it is.
@@ -116,6 +116,18 @@ run without it closes those networks again. An install from before the
 firewall had no `--admin-net`: its first update takes the networks from
 `trusted_networks` instead, so nobody who used the UI loses it.
 
+The car trusts the address range, not the network: every network it joins
+that uses the same range is an admin network too. `192.168.1.0/24`,
+`192.168.0.0/24` and `10.0.0.0/24` are what most routers ship with,
+including many cafe and hotel ones, and every client of such a network the
+car has saved would get the web UI. Give your home router an unusual subnet
+(e.g. `192.168.77.0/24`) and pass that. Networks wider than /16 are refused.
+
+The reverse-path check needs the kernel's nftables fib support; the Raspberry
+Pi and Debian kernels have it. Where it is missing, the firewall loads without
+that one rule and logs a warning (`journalctl -u carchomp-firewall`) rather
+than not at all.
+
 SSH (port 22) stays reachable everywhere, so the installer turns passwords
 off (`/etc/ssh/sshd_config.d/50-carchomp.conf`: keys only, no root login),
 but only once a user has a key in `~/.ssh/authorized_keys`. Until then it
@@ -133,7 +145,9 @@ Network access is opportunistic: nothing needs it, but maps, updates and the
 clock use it when it is there. Every Wi-Fi network the car knows is retried
 forever (NetworkManager gives up after four failures by default), and
 `carchomp-wifi.timer` checks every 30 seconds for a known network in range
-before falling back to the hotspot.
+before falling back to the hotspot. Once up, the hotspot stays up for at
+least two minutes, and as long as a client is on it, before the car looks
+for known networks again.
 
 eduroam, or any WPA-Enterprise network, is joined from the Wi-Fi panel, and
 never without checking the network's certificate, which is what keeps a fake
@@ -148,6 +162,11 @@ access point from collecting the password:
   system's CAs for that domain.
 - Prefer a device or app password, where the institution offers one, to your
   main account password: it is stored on the car.
+
+Enterprise networks saved by an older version without any certificate check
+no longer join by themselves: the installer (and so an update) turns their
+autoconnect off and names them. Forget each one in the Wi-Fi panel and join
+it again as above.
 
 The Pi has one Wi-Fi radio, so the car is either on a network or hosting its
 hotspot, never both. A second USB Wi-Fi adapter (one for the hotspot, one

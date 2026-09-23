@@ -46,9 +46,14 @@ The stage has to live inside the pi-gen directory, as above, for
 
 The installer runs in a chroot, where nothing can be started:
 
-- `have_systemd` is false, so the installer does not run `systemctl`. The
-  stage enables `postgresql`, `carchompd` (and `carchomp-sim` for a demo
-  image) itself; they start on first boot.
+- `have_systemd` is false, so the installer starts nothing. It still runs
+  `systemctl enable`/`disable` where that only edits files (the firewall on,
+  avahi's boot start off); the stage enables `postgresql`, `carchompd` (and
+  `carchomp-sim` for a demo image) itself. They start on first boot.
+- `nft` cannot check the firewall rules against the build machine's kernel
+  (under qemu it cannot talk to one at all), so the installer warns and
+  installs them unchecked; `carchomp-firewall.service` loads them at first
+  boot.
 - PostgreSQL is started with `service postgresql start` to create the
   database and the PostGIS extension, then stopped again by the stage.
   carchompd creates its tables on first boot.

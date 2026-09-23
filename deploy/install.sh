@@ -20,7 +20,8 @@
 #                    Run again without --demo once the hardware is there; that
 #                    deletes what the simulator recorded.
 #   --admin-net CIDR also serve the web UI and the .local name to this IPv4
-#                    network, e.g. 192.168.1.0/24 at home; repeat for more.
+#                    network (/16 or narrower), e.g. 192.168.77.0/24 at home;
+#                    repeat for more.
 #                    Anyone on it can manage Wi-Fi and install software.
 #                    Without it: this device and its hotspot only (and SSH).
 #   --reuse          run with the options of the last install (from
@@ -99,13 +100,17 @@ valid_net() {
 }
 nets=""
 for n in $admin_nets; do
-    if valid_net "$n"; then
+    if ! valid_net "$n"; then
+        if [ -z "$derived" ]; then echo "--admin-net: expected an IPv4 network such as 192.168.77.0/24: $n" >&2; exit 2; fi
+        echo "note: $n (trusted_networks) is not an IPv4 network; the firewall does not open the web UI to it" >&2
+    elif [ "$p" -lt 16 ]; then
+        # Anyone on it can manage Wi-Fi and install software: a home network,
+        # not the internet or a whole provider.
+        if [ -z "$derived" ]; then echo "--admin-net: $n is too wide; give your own network, /16 or narrower, such as 192.168.77.0/24" >&2; exit 2; fi
+        echo "note: $n (trusted_networks) is wider than /16; the firewall does not open the web UI to it" >&2
+    else
         # The hotspot and this device itself are always served.
         case $n in 10.42.0.0/24 | 127.*) ;; *) nets="$nets $n" ;; esac
-    elif [ -n "$derived" ]; then
-        echo "note: $n (trusted_networks) is not an IPv4 network; the firewall does not open the web UI to it" >&2
-    else
-        echo "--admin-net: expected an IPv4 network such as 192.168.1.0/24: $n" >&2; exit 2
     fi
 done
 admin_nets=${nets# }
@@ -266,14 +271,22 @@ fi
 chown -R carchomp: /var/lib/carchomp
 
 step "Firewall: $([ -n "$admin_nets" ] && echo "web UI from the hotspot and $admin_nets" || echo "web UI from the hotspot only")"
-# Replaced in one step, and only by a ruleset nft accepts.
+# Replaced in one step, and only by a ruleset nft accepts (without the
+# reverse-path rule if need be: firewall-load.sh, which the service runs too).
 # shellcheck disable=SC2086 # a list of networks
 sh "$root/deploy/firewall.sh" $admin_nets >/etc/carchomp/firewall.nft.new
-if ! nft -c -f /etc/carchomp/firewall.nft.new; then
+if sh "$root/deploy/firewall-load.sh" -c /etc/carchomp/firewall.nft.new; then
+    :
+elif have_systemd; then
     rm -f /etc/carchomp/firewall.nft.new
-    echo "the new firewall rules do not load; nothing was changed" >&2; exit 1
+    echo "the new firewall rules do not load; the firewall was left unchanged" >&2; exit 1
+else
+    # An image being built: nft checks against the build machine's kernel
+    # (under qemu, none at all). The service loads the rules at first boot.
+    echo "warning: nft cannot check the firewall rules here; they are installed anyway and loaded at first boot" >&2
 fi
 mv -f /etc/carchomp/firewall.nft.new /etc/carchomp/firewall.nft
+install -D -m 755 "$root/deploy/firewall-load.sh" /usr/local/lib/carchomp/firewall-load.sh
 install -m 644 "$root/deploy/carchomp-firewall.service" /etc/systemd/system/carchomp-firewall.service
 if have_systemd; then
     systemctl daemon-reload
@@ -298,6 +311,9 @@ if [ ! -x /usr/sbin/sshd ]; then
 elif [ -n "$keys" ]; then
     mkdir -p "${sshd_conf%/*}"
     printf '# Written by deploy/install.sh: keys only, since%s can log in with one.\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n' "$keys" >"$sshd_conf"
+    # sshd -t wants its privilege separation directory, which only exists
+    # while ssh runs (or an image is being built).
+    mkdir -p /run/sshd
     if /usr/sbin/sshd -t; then
         if have_systemd; then systemctl try-reload-or-restart ssh; fi
         echo "keys only (keys for:$keys)"
@@ -442,9 +458,20 @@ fi
 if have_systemd && nmcli general status >/dev/null 2>&1; then
     # NetworkManager stops trying a network after 4 failures, for good: in a
     # moving car, keep trying (not the hotspot, which carchomp-wifi starts).
+    # Enterprise profiles from before that check nothing (no CA, no server
+    # name) would hand the password to any access point with the same name:
+    # they no longer join by themselves.
     nmcli -g UUID,TYPE connection show | sed -n 's/:802-11-wireless$//p' | while IFS= read -r uuid; do
-        [ "$(nmcli -g 802-11-wireless.mode connection show "$uuid")" = ap ] ||
-            nmcli connection modify "$uuid" connection.autoconnect-retries 0 || true
+        [ "$(nmcli -g 802-11-wireless.mode connection show "$uuid")" != ap ] || continue
+        nmcli connection modify "$uuid" connection.autoconnect-retries 0 || true
+        case $(nmcli -g 802-11-wireless-security.key-mgmt connection show "$uuid") in wpa-eap*) ;; *) continue ;; esac
+        { read -r sysca; read -r ca; read -r domain; } <<EAP
+$(nmcli -g 802-1x.system-ca-certs,802-1x.ca-cert,802-1x.domain-suffix-match connection show "$uuid")
+EAP
+        if [ "$sysca" = no ] && [ -z "$ca" ] && [ -z "$domain" ]; then
+            nmcli connection modify "$uuid" connection.autoconnect no || true
+            echo "warning: the Wi-Fi network \"$(nmcli -g connection.id connection show "$uuid")\" was saved without checking the server's certificate, so it no longer joins by itself. Forget it in the Wi-Fi panel and join again with your institution's .eap-config file (https://cat.eduroam.org) or its RADIUS server domain." >&2
+        fi
     done
 fi
 wifi_timer=/etc/systemd/system/carchomp-wifi.timer
@@ -454,12 +481,19 @@ if [ -n "$ssid" ] || [ -f "$wifi_timer" ]; then
 #!/bin/sh
 # Join a known Wi-Fi network in range, else host carchomp-hotspot.
 # Run every 30 seconds by carchomp-wifi.timer; installed by deploy/install.sh.
+# An empty hotspot is taken down to look for known networks only after two
+# minutes, so a phone has time to join it.
 dev=wlan0 ap=carchomp-hotspot
+# When the hotspot came up or last had a client, in seconds since boot.
+since=/run/carchomp-wifi-hotspot now=$(cut -d. -f1 /proc/uptime)
 case $(nmcli -g GENERAL.STATE device show $dev) in
     100*) [ "$(nmcli -g GENERAL.CONNECTION device show $dev)" = $ap ] || exit 0
         # Someone is on the hotspot: do not pull it from under them.
-        [ -z "$(iw dev $dev station dump)" ] || exit 0
-        nmcli connection down $ap >/dev/null ;;
+        if [ -n "$(iw dev $dev station dump)" ] || [ ! -s $since ]; then echo "$now" >$since; exit 0; fi
+        # Leave a phone two minutes to join before looking again.
+        [ $((now - $(cat $since))) -ge 120 ] || exit 0
+        nmcli connection down $ap >/dev/null
+        rm -f $since ;;
     30*) ;;
     *) exit 0 ;; # connecting, or unavailable
 esac
@@ -469,7 +503,7 @@ nmcli -g NAME,TYPE connection show | sed -n 's/:802-11-wireless$//p' | sed 's/\\
     ssid=$(nmcli -g 802-11-wireless.ssid connection show "$name" | sed 's/\\:/:/g')
     printf '%s\n' "$seen" | grep -qxF "$ssid" && nmcli connection up "$name" >/dev/null 2>&1 && exit 10
 done
-[ $? -eq 10 ] || nmcli connection up $ap >/dev/null
+[ $? -eq 10 ] || { nmcli connection up $ap >/dev/null && echo "$now" >$since; }
 SH
     chmod 755 /usr/local/sbin/carchomp-wifi
     cat >/etc/systemd/system/carchomp-wifi.service <<'UNIT'
