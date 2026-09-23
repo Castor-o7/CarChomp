@@ -15,7 +15,7 @@ pub enum Method {
     TtlsEapMschapv2,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Profile {
     pub method: Method,
     /// One or more PEM CERTIFICATE blocks.
@@ -27,6 +27,23 @@ pub struct Profile {
     pub client_p12: Option<Vec<u8>>,
     pub passphrase: Option<String>,
     pub ssids: Vec<String>,
+}
+
+/// By hand, so that no `{:?}` can print the client key or its passphrase.
+impl std::fmt::Debug for Profile {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let redacted = |present: bool| if present { Some("<redacted>") } else { None };
+        f.debug_struct("Profile")
+            .field("method", &self.method)
+            .field("ca_pem", &self.ca_pem)
+            .field("server_names", &self.server_names)
+            .field("anonymous_identity", &self.anonymous_identity)
+            .field("identity", &self.identity)
+            .field("client_p12", &redacted(self.client_p12.is_some()))
+            .field("passphrase", &redacted(self.passphrase.is_some()))
+            .field("ssids", &self.ssids)
+            .finish()
+    }
 }
 
 /// Parse an `.eap-config` file, using the first authentication method in it
@@ -50,7 +67,8 @@ pub fn parse(xml: &str) -> Result<Profile, String> {
     let server = children(auth, "ServerSideCredential").collect::<Vec<_>>();
     let mut ca_pem = String::new();
     for ca in server.iter().flat_map(|s| children(*s, "CA")) {
-        if attr_is(ca, "format", "X.509") && attr_is(ca, "encoding", "base64") {
+        // An empty element is no CA at all.
+        if attr_is(ca, "format", "X.509") && attr_is(ca, "encoding", "base64") && !text(ca).trim().is_empty() {
             let der = base64_decode(text(ca)).ok_or("a CA certificate is not valid base64")?;
             ca_pem.push_str(&pem("CERTIFICATE", &der));
         }
@@ -382,6 +400,11 @@ mod tests {
                 "",
             );
         assert!(parse(&cat(&no_ca)).unwrap_err().contains("no CA"));
+        let blank_ca = no_ca.replace(
+            "<ServerID>radius1",
+            "<CA format=\"X.509\" encoding=\"base64\"> \n\t</CA><CA/><ServerID>radius1",
+        );
+        assert!(parse(&cat(&blank_ca)).unwrap_err().contains("no CA"));
 
         let no_id = peap()
             .replace("<ServerID>radius1.example.edu</ServerID>", "")
@@ -418,6 +441,16 @@ mod tests {
         assert!(parse("<gpx/>").unwrap_err().contains("not an eap-config"));
         let bad = peap().replace(CA2, "not*base64");
         assert!(parse(&cat(&bad)).unwrap_err().contains("base64"));
+    }
+
+    #[test]
+    fn debug_hides_the_client_secrets() {
+        let mut p = parse(&cat(&peap())).unwrap();
+        p.client_p12 = Some(b"KEYBYTES".to_vec());
+        p.passphrase = Some("hunter2".into());
+        let shown = format!("{p:?}");
+        assert!(!shown.contains("hunter2") && !shown.contains("75, 69, 89"), "{shown}");
+        assert!(shown.contains("<redacted>") && shown.contains("radius1.example.edu"), "{shown}");
     }
 
     #[test]
