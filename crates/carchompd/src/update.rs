@@ -36,22 +36,18 @@ async fn status() -> Response {
     ([(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
-/// Whether an update is under way: status.json says so and the unit agrees.
-/// The unit is asked too because a power cut mid-update leaves "running"
-/// in the file for good.
+/// Whether an update is under way, asked of the unit rather than
+/// status.json: the file still shows the last run until update.sh writes to
+/// it, and a power cut mid-update leaves "running" in it for good. A oneshot
+/// is "activating" while its ExecStart runs and "deactivating" during
+/// ExecStopPost, so `is-active --quiet` (true only for active) would miss it.
 async fn running() -> bool {
-    let Ok(text) = tokio::fs::read_to_string(Path::new(DIR).join("status.json")).await else {
-        return false;
-    };
-    if !says_running(&text) {
-        return false;
-    }
-    let active = Command::new("systemctl").args(["is-active", "--quiet", UNIT]).status().await;
-    active.is_ok_and(|s| s.success())
+    let out = Command::new("systemctl").args(["show", "-p", "ActiveState", "--value", UNIT]).output().await;
+    out.is_ok_and(|o| o.status.success() && busy(&String::from_utf8_lossy(&o.stdout)))
 }
 
-fn says_running(status_json: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(status_json).is_ok_and(|v| v["state"] == "running")
+fn busy(active_state: &str) -> bool {
+    matches!(active_state.trim(), "activating" | "active" | "reloading" | "deactivating")
 }
 
 async fn upload(uploading: Arc<Semaphore>, body: Body) -> Response {
@@ -149,11 +145,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn running_only_when_the_file_says_so() {
-        assert!(says_running(r#"{"state":"running","version":"v1","message":"","log":""}"#));
-        assert!(!says_running(r#"{"state":"done"}"#));
-        assert!(!says_running(r#"{"state":"failed"}"#));
-        assert!(!says_running("{\"state\":\"runn"));
-        assert!(!says_running(""));
+    fn busy_while_the_unit_is_anywhere_but_at_rest() {
+        for state in ["activating\n", "active", "reloading", "deactivating\n"] {
+            assert!(busy(state), "{state}");
+        }
+        for state in ["inactive\n", "failed", ""] {
+            assert!(!busy(state), "{state}");
+        }
     }
 }
