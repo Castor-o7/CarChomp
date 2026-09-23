@@ -1,5 +1,23 @@
-<script>
+<script module>
   import { api, ui } from './state.svelte.js';
+
+  // A download outlives this panel, so noticing that it finished must too:
+  // the map only draws a new region once mapsChanged is bumped.
+  let watching = false;
+  async function watchJob() {
+    if (watching) return;
+    watching = true;
+    let job;
+    do {
+      await new Promise((done) => setTimeout(done, 2000));
+      ({ job } = await api('maps').catch(() => ({ job: {} })));
+    } while (job && !job.error);
+    watching = false;
+    ui.mapsChanged++;
+  }
+</script>
+
+<script>
 
   const BUILDS = 'https://build-metadata.protomaps.dev/builds.json';
   const DETAIL = [
@@ -19,9 +37,8 @@
   const report = (e) => (error = e.message);
 
   async function load() {
-    const was = downloading;
     maps = await api('maps');
-    if (was && !downloading) ui.mapsChanged++;
+    if (downloading) watchJob();
   }
 
   $effect(() => {
@@ -35,11 +52,13 @@
     try {
       // The planet archive is rebuilt daily under a new name; use the newest
       // unless the daemon has been told where to look.
+      // Zoomed out past one world width, the view reaches beyond ±180°.
+      const [w, s, e, n] = ui.bounds;
       const source = maps.source ?? `https://build.protomaps.com/${(await (await fetch(BUILDS)).json()).at(-1).key}`;
       await api('maps', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name, bbox: $state.snapshot(ui.bounds), maxzoom, source }),
+        body: JSON.stringify({ name, bbox: [Math.max(-180, w), Math.max(-90, s), Math.min(180, e), Math.min(90, n)], maxzoom, source }),
       });
       name = '';
       await load();
