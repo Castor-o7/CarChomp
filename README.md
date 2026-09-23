@@ -103,6 +103,16 @@ Progress and the installer's last lines are in
 `/var/lib/carchomp/update/update.log`. By hand, unpack the bundle and run
 `sudo carchomp/deploy/install.sh --reuse`.
 
+Bundles come from `tools/bundle.sh` (arm64 by default; see its header) or
+from a release: every `v*` tag builds one, plus a ready-to-flash Raspberry Pi
+OS image (`deploy/pi-gen/README.md`).
+
+- An install from before web updates has no updater yet: run the bundle's
+  installer by hand once, as above. `--reuse` works out its options.
+- An update that adds a package (chrony came after the first installs) must
+  reach the internet for apt. On the car's hotspot alone it stops before
+  changing anything, and the old version keeps running.
+
 ### On a reTerminal, before the GPS and radio arrive
 
     sudo deploy/install.sh --kiosk "$USER" --hotspot carchomp --demo
