@@ -16,10 +16,11 @@ use serde::{Deserialize, Serialize};
 use std::{
     path::{Path as FsPath, PathBuf},
     process::Stdio,
+    os::unix::fs::MetadataExt,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
-use tokio::process::Command;
+use tokio::{process::Command, sync::Notify};
 use tower_http::services::ServeDir;
 
 #[derive(Clone)]
@@ -34,7 +35,15 @@ struct Maps {
 struct Job {
     name: String,
     error: Option<String>,
+    /// Wakes the running download to stop it. One per job, so a late
+    /// cancel cannot reach the next download.
+    #[serde(skip)]
+    cancel: Arc<Notify>,
 }
+
+/// A download that writes nothing for this long is given up on (a stalled
+/// connection never errors on its own).
+const STALL: Duration = Duration::from_secs(5 * 60);
 
 /// Downloads are not allowed to leave less than this free on the disk the
 /// database lives on.
@@ -124,6 +133,39 @@ fn size(path: PathBuf) -> u64 {
     std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
 }
 
+/// Bytes of a download actually on disk. pmtiles sizes its output to the
+/// whole archive up front and fills it in at fixed offsets, so the length
+/// says nothing about progress; on a filesystem with sparse files, the
+/// allocated blocks do. Never more than the length.
+fn written(path: &FsPath) -> Option<(u64, u64)> {
+    std::fs::metadata(path).ok().map(|m| ((m.blocks() * 512).min(m.len()), m.len()))
+}
+
+/// Notices a download that has stopped writing.
+struct Stall {
+    written: u64,
+    since: Instant,
+}
+
+impl Stall {
+    fn new(now: Instant) -> Stall {
+        Stall { written: 0, since: now }
+    }
+
+    /// Feed one sample of `written` (None: no file yet). True once nothing
+    /// new has been written for `STALL`. A file that is fully allocated (no
+    /// sparse files here, or the last moments of a download) tells us
+    /// nothing, so it never counts as stalled.
+    fn stalled(&mut self, sample: Option<(u64, u64)>, now: Instant) -> bool {
+        let (written, len) = sample.unwrap_or((0, 0));
+        if written > self.written || (len > 0 && written >= len) {
+            self.written = written;
+            self.since = now;
+        }
+        now.duration_since(self.since) >= STALL
+    }
+}
+
 async fn list(State(maps): State<Maps>) -> Response {
     let mut archives: Vec<_> = std::fs::read_dir(&maps.dir)
         .into_iter()
@@ -138,7 +180,7 @@ async fn list(State(maps): State<Maps>) -> Response {
     archives.sort_by_key(|a| a["name"].as_str().map(str::to_owned));
 
     let job = maps.job.lock().unwrap().clone().map(|job| {
-        let bytes = size(maps.partial(&job.name));
+        let bytes = written(&maps.partial(&job.name)).map_or(0, |(written, _)| written);
         serde_json::json!({ "name": job.name, "error": job.error, "bytes": bytes })
     });
     Json(serde_json::json!({ "archives": archives, "job": job, "source": maps.source })).into_response()
@@ -171,12 +213,13 @@ async fn download(State(maps): State<Maps>, Json(region): Json<Region>) -> Respo
     let Some(budget) = free_bytes(&maps.dir).and_then(|free| free.checked_sub(RESERVE_BYTES)) else {
         return (StatusCode::INSUFFICIENT_STORAGE, "less than 2 GB free").into_response();
     };
+    let cancel = Arc::new(Notify::new());
     {
         let mut job = maps.job.lock().unwrap();
         if job.as_ref().is_some_and(|j| j.error.is_none()) {
             return (StatusCode::CONFLICT, "a download is already running").into_response();
         }
-        *job = Some(Job { name: region.name.clone(), error: None });
+        *job = Some(Job { name: region.name.clone(), error: None, cancel: cancel.clone() });
     }
 
     tokio::spawn(async move {
@@ -200,6 +243,13 @@ async fn download(State(maps): State<Maps>, Json(region): Json<Region>) -> Respo
                 tokio::time::sleep(Duration::from_secs(2)).await;
             }
         };
+        // Stops pmtiles once it has written nothing for a while.
+        let stalled = async {
+            let mut stall = Stall::new(Instant::now());
+            while !stall.stalled(written(&partial), Instant::now()) {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+        };
         let error = match child {
             Err(e) => Some(format!("cannot run pmtiles: {e}")),
             Ok(child) => tokio::select! {
@@ -209,19 +259,45 @@ async fn download(State(maps): State<Maps>, Json(region): Json<Region>) -> Respo
                     Err(e) => Some(format!("pmtiles: {e}")),
                 },
                 () = outgrown => Some("stopped: the region would leave less than 2 GB free".to_owned()),
+                () = stalled => Some("stalled: no data for 5 minutes".to_owned()),
+                () = cancel.notified() => Some(CANCELLED.to_owned()),
             },
         };
         if let Some(error) = &error {
             tracing::warn!("maps: {}: {error}", region.name);
             let _ = std::fs::remove_file(&partial);
         }
-        *maps.job.lock().unwrap() = error.map(|error| Job { name: region.name, error: Some(error) });
+        // A cancelled download leaves nothing behind, not even an error.
+        let error = error.filter(|e| e != CANCELLED);
+        *maps.job.lock().unwrap() = error.map(|error| Job { name: region.name, error: Some(error), cancel });
     });
     StatusCode::ACCEPTED.into_response()
 }
 
+const CANCELLED: &str = "cancelled";
+
+/// Delete a region. A region still downloading is cancelled instead
+/// (pmtiles is killed and its partial file removed; an older archive of the
+/// same name stays), and a failed download is cleared.
 async fn remove(State(maps): State<Maps>, Path(name): Path<String>) -> StatusCode {
-    if valid_name(&name) && std::fs::remove_file(maps.archive(&name)).is_ok() {
+    if !valid_name(&name) {
+        return StatusCode::NOT_FOUND;
+    }
+    let cleared = {
+        let mut job = maps.job.lock().unwrap();
+        match job.as_ref() {
+            Some(j) if j.name == name && j.error.is_none() => {
+                j.cancel.notify_one();
+                return StatusCode::NO_CONTENT;
+            }
+            Some(j) if j.name == name => {
+                *job = None;
+                true
+            }
+            _ => false,
+        }
+    };
+    if std::fs::remove_file(maps.archive(&name)).is_ok() || cleared {
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND
@@ -245,6 +321,28 @@ mod tests {
         ] {
             assert!(!protomaps_build(url), "{url}");
         }
+    }
+
+    #[test]
+    fn stalls_only_when_nothing_is_written() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut stall = Stall::new(t0);
+        // Directories first: no file yet.
+        assert!(!stall.stalled(None, at(60)));
+        // Sized up front, filling in.
+        assert!(!stall.stalled(Some((4096, 1 << 30)), at(120)));
+        assert!(!stall.stalled(Some((8192, 1 << 30)), at(400)));
+        assert!(!stall.stalled(Some((8192, 1 << 30)), at(699)));
+        assert!(stall.stalled(Some((8192, 1 << 30)), at(700)));
+
+        // No sparse files: fully allocated from the start, so no signal.
+        let mut stall = Stall::new(t0);
+        assert!(!stall.stalled(Some((1 << 30, 1 << 30)), at(3600)));
+
+        // Never started at all.
+        let mut stall = Stall::new(t0);
+        assert!(stall.stalled(None, at(300)));
     }
 
     #[test]
