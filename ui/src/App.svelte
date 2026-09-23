@@ -6,15 +6,28 @@
   import Tracks from './Tracks.svelte';
   import { live, ui } from './state.svelte.js';
 
+  // gpsd goes quiet when it loses the fix, so an old fix means no GPS.
+  let fixAt = $state(0);
+  let now = $state(Date.now());
+  $effect(() => {
+    if (live.fix) fixAt = Date.now();
+  });
+  $effect(() => {
+    const timer = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
+  const fresh = $derived(live.fix && now - fixAt < 5000);
+
   const speed = $derived.by(() => {
-    const ms = live.fix?.speed;
+    if (!fresh) return '–';
+    const ms = live.fix.speed;
     if (ms == null) return '–';
     return Math.round(ms * (ui.metric ? 3.6 : 2.23694));
   });
 
   const road = $derived(
     !live.connected ? ['offline', 'Offline']
-    : !live.fix ? ['', 'No GPS']
+    : !fresh ? ['', 'No GPS']
     : live.road === true ? ['new', 'New road']
     : live.road === false ? ['', 'Been here']
     : ['', 'Parked'],

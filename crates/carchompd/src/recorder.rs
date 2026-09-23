@@ -13,15 +13,21 @@ use time::OffsetDateTime;
 use tokio::sync::{broadcast::error::RecvError, watch};
 
 pub async fn source_id(db: &PgPool, kind: &str, name: &str) -> sqlx::Result<i16> {
-    sqlx::query_scalar(
-        "INSERT INTO source (kind, name) VALUES ($1, $2)
-         ON CONFLICT (kind, name) DO UPDATE SET name = excluded.name
-         RETURNING id",
-    )
-    .bind(kind)
-    .bind(name)
-    .fetch_one(db)
-    .await
+    // Look before inserting: an INSERT takes an id from the (smallint)
+    // sequence even when it then conflicts, and this runs on every boot.
+    let find = || sqlx::query_scalar("SELECT id FROM source WHERE kind = $1 AND name = $2").bind(kind).bind(name);
+    if let Some(id) = find().fetch_optional(db).await? {
+        return Ok(id);
+    }
+    let id = sqlx::query_scalar("INSERT INTO source (kind, name) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING id")
+        .bind(kind)
+        .bind(name)
+        .fetch_optional(db)
+        .await?;
+    match id {
+        Some(id) => Ok(id),
+        None => find().fetch_one(db).await, // inserted by someone else meanwhile
+    }
 }
 
 /// Has an earlier track used the road we are on? "Used" means one of its
@@ -38,7 +44,7 @@ const KNOWN_ROAD: &str = "
           AND ST_DWithin(s.geom, ST_MakePoint($2, $3)::geography, $4)
           AND ST_DWithin(edge.geom::geography, ST_MakePoint($2, $3)::geography, $4)
           AND ($5::float8 IS NULL OR $6 >= abs(90 - mod((3690 + $5 - degrees(
-                  ST_Azimuth(ST_StartPoint(edge.geom), ST_EndPoint(edge.geom))))::numeric, 180))))";
+                  ST_Azimuth(ST_StartPoint(edge.geom)::geography, ST_EndPoint(edge.geom)::geography)))::numeric, 180))))";
 
 struct Recorder {
     db: PgPool,
@@ -50,6 +56,14 @@ struct Recorder {
     beacon: SmartBeacon,
     status: watch::Sender<Status>,
     last_moving: Option<OffsetDateTime>,
+    last_road_check: Option<OffsetDateTime>,
+}
+
+/// Seconds between "known road?" checks, whether or not fixes are stored.
+const ROAD_CHECK: f64 = 3.0;
+
+fn road_check_due(last: Option<OffsetDateTime>, now: OffsetDateTime) -> bool {
+    last.is_none_or(|t| (now - t).as_seconds_f64().abs() >= ROAD_CHECK)
 }
 
 pub fn run(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Config) -> impl Future<Output = ()> + use<> {
@@ -63,6 +77,7 @@ pub fn run(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Config)
         beacon: SmartBeacon::new(config.beacon),
         status,
         last_moving: None,
+        last_road_check: None,
     };
     async move {
         let mut events = rec.bus.subscribe();
@@ -107,13 +122,17 @@ impl Recorder {
         };
 
         let kept = self.beacon.push(fix);
-        if kept.is_empty() {
+        if !kept.is_empty() {
+            insert_fixes(&self.db, source, track, &kept).await?;
+        }
+
+        // Checked every few seconds rather than at the storage rate, which
+        // can be two minutes when slow: a gentle fork onto a new road must
+        // not wait for the next stored fix.
+        if !road_check_due(self.last_road_check, fix.time) {
             return Ok(());
         }
-        insert_fixes(&self.db, source, track, &kept).await?;
-
-        // Checked at the beacon rate, not 1 Hz: often enough to notice, and
-        // the rate rises exactly when we turn onto a different road.
+        self.last_road_check = Some(fix.time);
         let known: bool = sqlx::query_scalar(KNOWN_ROAD)
             .bind(track)
             .bind(fix.lon)
@@ -181,10 +200,12 @@ impl Recorder {
     async fn end_track(&mut self) -> sqlx::Result<()> {
         let track = self.status.borrow().track;
         if let Some(id) = track {
-            // Cleared first: if the database fails here, the track is picked
-            // up as abandoned at the next start rather than retried every fix.
+            // Cleared even if the database fails, so the track is picked up
+            // as abandoned at the next start rather than retried every fix;
+            // but only once it is stored, so clients reload a finished track.
+            let finished = finish_track(&self.db, id).await;
             self.set(|s| *s = Status::default());
-            finish_track(&self.db, id).await?;
+            finished?;
             tracing::info!("track {id} ended");
         }
         Ok(())
@@ -225,18 +246,23 @@ pub async fn insert_fixes(db: &PgPool, source: i16, track: i64, fixes: &[Fix]) -
     Ok(())
 }
 
-/// Close a track and index its geometry. Tracks too short to draw are dropped.
-/// Also used by import.
+const MIN_TRACK: f64 = 50.0;
+
+/// Close a track and index its geometry. Tracks shorter than `MIN_TRACK`
+/// metres (a GPS glitch while parked) are dropped. Safe to repeat: the
+/// segments are rebuilt from the fixes. Also used by import.
 pub async fn finish_track(db: &PgPool, id: i64) -> sqlx::Result<()> {
     let mut tx = db.begin().await?;
+    sqlx::query("DELETE FROM track_segment WHERE track_id = $1").bind(id).execute(&mut *tx).await?;
     sqlx::query(
         "INSERT INTO track_segment (track_id, geom)
          SELECT $1, ST_Subdivide(line, 32)::geography
          FROM (SELECT ST_MakeLine(geom ORDER BY time) AS line
                FROM fix WHERE track_id = $1) t
-         WHERE ST_NPoints(line) > 1",
+         WHERE ST_Length(line::geography) >= $2",
     )
     .bind(id)
+    .bind(MIN_TRACK)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
@@ -250,4 +276,18 @@ pub async fn finish_track(db: &PgPool, id: i64) -> sqlx::Result<()> {
         .execute(&mut *tx)
         .await?;
     tx.commit().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::Duration;
+
+    #[test]
+    fn road_check_cadence() {
+        let t = OffsetDateTime::UNIX_EPOCH;
+        assert!(road_check_due(None, t));
+        assert!(!road_check_due(Some(t), t + Duration::seconds(1)));
+        assert!(road_check_due(Some(t), t + Duration::seconds(3)));
+    }
 }
