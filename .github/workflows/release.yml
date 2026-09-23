@@ -1,0 +1,77 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  # The pi-gen branch that builds 64-bit Raspberry Pi OS Bookworm.
+  PI_GEN_BRANCH: arm64
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # git describe needs the tags
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - run: tools/bundle.sh aarch64-unknown-linux-gnu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle
+          path: target/bundle/*.tar.gz
+      - run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --generate-notes target/bundle/*.tar.gz
+
+  image:
+    needs: bundle
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundle
+          path: bundle
+      - name: Make room
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+      - name: Prepare pi-gen
+        env:
+          FIRST_USER_PASS: ${{ secrets.IMAGE_PASSWORD }}
+        run: |
+          [ -n "$FIRST_USER_PASS" ] || { echo "set the IMAGE_PASSWORD secret: the image's user password" >&2; exit 1; }
+          git clone --depth 1 --branch "$PI_GEN_BRANCH" https://github.com/RPi-Distro/pi-gen
+          cp -r deploy/pi-gen/stage-carchomp pi-gen/
+          mkdir pi-gen/stage-carchomp/00-install/files
+          tar -xzf bundle/*.tar.gz -C pi-gen/stage-carchomp/00-install/files
+          touch pi-gen/stage2/SKIP_IMAGES pi-gen/stage4/SKIP_IMAGES
+          cat >pi-gen/config <<END
+          IMG_NAME=carchomp-${GITHUB_REF_NAME}
+          RELEASE=bookworm
+          STAGE_LIST="stage0 stage1 stage2 stage3 stage4 stage-carchomp"
+          FIRST_USER_NAME=pi
+          FIRST_USER_PASS='${FIRST_USER_PASS}'
+          DISABLE_FIRST_BOOT_USER_RENAME=1
+          DEPLOY_COMPRESSION=xz
+          LOCALE_DEFAULT=en_US.UTF-8
+          KEYBOARD_KEYMAP=us
+          KEYBOARD_LAYOUT="English (US)"
+          TIMEZONE_DEFAULT=America/Los_Angeles
+          WPA_COUNTRY=US
+          END
+      - name: Build the image
+        working-directory: pi-gen
+        run: ./build-docker.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: image
+          path: pi-gen/deploy/*.img.xz
+          compression-level: 0
+      - run: gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" pi-gen/deploy/*.img.xz
