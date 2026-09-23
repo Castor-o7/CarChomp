@@ -8,6 +8,8 @@ pub struct Network {
     /// 0..=100
     pub signal: u8,
     pub secure: bool,
+    /// WPA-Enterprise (802.1X): joining needs an identity as well as a password.
+    pub enterprise: bool,
     pub active: bool,
 }
 
@@ -37,6 +39,7 @@ pub fn wifi_list(output: &str) -> Vec<Network> {
             ssid: ssid.clone(),
             signal: signal.parse().unwrap_or(0),
             secure: !security.is_empty() && security != "--",
+            enterprise: security.contains("802.1X"),
             active: active == "yes",
         };
         if network.ssid.is_empty() {
@@ -45,6 +48,7 @@ pub fn wifi_list(output: &str) -> Vec<Network> {
         match networks.iter_mut().find(|n| n.ssid == network.ssid) {
             Some(seen) => {
                 seen.active |= network.active;
+                seen.enterprise |= network.enterprise;
                 seen.signal = seen.signal.max(network.signal);
             }
             None => networks.push(network),
@@ -81,6 +85,14 @@ mod tests {
         let got = wifi_list(out);
         let summary: Vec<_> = got.iter().map(|n| (n.ssid.as_str(), n.signal, n.secure, n.active)).collect();
         assert_eq!(summary, [("home", 72, true, true), ("cafe", 90, false, false), ("lab", 80, false, false)]);
+        assert!(got.iter().all(|n| !n.enterprise));
+    }
+
+    #[test]
+    fn flags_enterprise_networks() {
+        let got = wifi_list("no:eduroam:60:WPA2 802.1X\nno:home:50:WPA2\n");
+        let summary: Vec<_> = got.iter().map(|n| (n.ssid.as_str(), n.secure, n.enterprise)).collect();
+        assert_eq!(summary, [("eduroam", true, true), ("home", true, false)]);
     }
 
     #[test]
