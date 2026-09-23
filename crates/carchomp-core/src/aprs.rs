@@ -188,10 +188,10 @@ fn fill(p: &mut Packet, to: &str, info: &[u8]) -> Option<()> {
         b':' => {
             let (addressee, rest) = body.split_at_checked(9)?;
             let message = text(rest.strip_prefix(b":")?);
-            let message = message.rsplit_once('{').map_or(message.as_str(), |(m, _id)| m);
-            if message.starts_with("ack") || message.starts_with("rej") {
+            if is_receipt(&message) {
                 return None; // delivery receipts are noise to a listener
             }
+            let message = message.rsplit_once('{').map_or(message.as_str(), |(m, _id)| m);
             p.kind = Kind::Message;
             p.addressee = Some(text(addressee));
             p.text = message.trim().to_owned();
@@ -222,8 +222,49 @@ fn fill(p: &mut Packet, to: &str, info: &[u8]) -> Option<()> {
             *p = Packet { direct: false, ..parse_info(from, to.split(',').next()?, &body[colon + 1..]) };
             Some(())
         }
-        _ => None,
+        // A GPS sentence sent as is, by trackers in NMEA mode.
+        b'$' => located(p, nmea(body)?),
+        // Old TNCs may put text before the `!`, which may come anywhere in
+        // the first 40 characters.
+        _ => {
+            let i = info.iter().take(40).position(|&b| b == b'!')?;
+            located(p, plain_or_compressed(&info[i + 1..])?)
+        }
     }
+}
+
+/// `ack` or `rej` and the id of the message it answers (1 to 5 letters and
+/// digits), possibly followed by `}` and a reply-ack id. Text that merely
+/// starts with "ack" or "rej" is a message.
+fn is_receipt(m: &str) -> bool {
+    let Some(rest) = m.strip_prefix("ack").or_else(|| m.strip_prefix("rej")) else {
+        return false;
+    };
+    let (id, reply) = rest.split_once('}').unwrap_or((rest, ""));
+    (1..=5).contains(&id.len()) && reply.len() <= 5 && id.bytes().chain(reply.bytes()).all(|b| b.is_ascii_alphanumeric())
+}
+
+/// `GPRMC`, `GPGGA` or `GPGLL` (any talker) without the `$`: positions are
+/// `ddmm.mmmm,N,dddmm.mmmm,W`.
+fn nmea(body: &[u8]) -> Option<Located<'_>> {
+    let sentence = std::str::from_utf8(body).ok()?;
+    let sentence = sentence.split_once('*').map_or(sentence, |(s, _checksum)| s);
+    let f: Vec<&str> = sentence.trim().split(',').collect();
+    let (at, speed, course) = match f.first()?.get(2..)? {
+        "RMC" if *f.get(2)? == "A" => (3, f.get(7)?.parse::<f64>().ok().map(|k| k * KNOT), f.get(8)?.parse().ok()),
+        "GGA" if !matches!(*f.get(6)?, "" | "0") => (2, None, None),
+        "GLL" => (1, None, None),
+        _ => return None,
+    };
+    let angle = |i: usize, pos: u8, neg: u8| {
+        let v: f64 = f.get(i)?.parse().ok()?;
+        let [h] = f.get(i + 1)?.as_bytes() else { return None };
+        let deg = (v / 100.0).trunc();
+        Some((deg + (v - deg * 100.0) / 60.0) * hemisphere(*h, pos, neg)?)
+    };
+    let (lat, lon) = (angle(at, b'N', b'S')?, angle(at + 2, b'E', b'W')?);
+    let position = Position { lat, lon, symbol: "/>".into(), speed, course };
+    Some(Located { position, rest: &[], number: None })
 }
 
 /// A decoded position plus whatever followed it in the packet.
@@ -579,6 +620,40 @@ mod tests {
         assert_eq!((p.kind, p.addressee.as_deref(), p.text.as_str()), (Kind::Message, Some("NWS-WARN"), "Red flag warning until 8PM PDT"));
         assert_eq!(parse("APRS", b":BLN1     :Net tonight 7pm").addressee.as_deref(), Some("BLN1"));
         assert_eq!(parse("APRS", b":N0CALL-9 :ack12").kind, Kind::Other);
+        assert_eq!(parse("APRS", b":N0CALL-9 :rej3}AB").kind, Kind::Other);
+        for (info, to, text) in [
+            (&b":BLN1     :ack from EOC received{03"[..], "BLN1", "ack from EOC received"),
+            (b":NWS-WARN :rejoin I-84 at exit 17", "NWS-WARN", "rejoin I-84 at exit 17"),
+        ] {
+            let p = parse("APRS", info);
+            assert_eq!((p.kind, p.addressee.as_deref(), p.text.as_str()), (Kind::Message, Some(to), text));
+        }
+    }
+
+    #[test]
+    fn raw_nmea_positions() {
+        let p = parse("GPS", b"$GPRMC,231225,A,4530.1234,N,12230.5678,W,012.3,090.0,220926,,*6A");
+        let pos = p.position.unwrap();
+        assert_eq!(p.kind, Kind::Position);
+        assert!(close(pos.lat, 45.0 + 30.1234 / 60.0) && close(pos.lon, -(122.0 + 30.5678 / 60.0)));
+        assert!(close(pos.speed.unwrap(), 12.3 * KNOT));
+        assert_eq!(pos.course, Some(90.0));
+
+        let pos = parse("GPS", b"$GPGGA,231225,4530.1234,S,01230.5678,E,1,08,0.9,545.4,M,46.9,M,,*47").position.unwrap();
+        assert!(close(pos.lat, -(45.0 + 30.1234 / 60.0)) && close(pos.lon, 12.0 + 30.5678 / 60.0));
+        assert_eq!((pos.speed, pos.course), (None, None));
+
+        // No fix yet (RMC status V, GGA quality 0), and a sentence we do not read.
+        for junk in [&b"$GPRMC,231225,V,,,,,,,220926,,*33"[..], b"$GPGGA,231225,4530.1234,N,12230.5678,W,0,00,,,M,,M,,*47", b"$ULTW0000000102F8"] {
+            assert_eq!(parse("GPS", junk).position, None, "{junk:?}");
+        }
+    }
+
+    #[test]
+    fn position_after_leading_text() {
+        let p = parse("APRS", b"TinyTrak !4903.50N/07201.75W>hello");
+        assert_eq!((p.kind, p.text.as_str()), (Kind::Position, "hello"));
+        assert!(close(p.position.unwrap().lat, 49.058_333));
     }
 
     #[test]

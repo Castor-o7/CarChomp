@@ -2,7 +2,7 @@
 //! PostGIS directly.
 
 use serde_json::Value;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use time::{OffsetDateTime, PrimitiveDateTime, format_description::well_known::Rfc3339, macros::format_description};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Track {
@@ -18,8 +18,9 @@ pub struct Point {
     pub time: Option<OffsetDateTime>,
 }
 
-/// Parse a GPX or GeoJSON document, whichever it turns out to be. Tracks with
-/// fewer than two points are dropped.
+/// Parse a GPX or GeoJSON document, whichever it turns out to be. In a track
+/// where only some points have a time, the others are dropped, so the times
+/// that are there are kept. Tracks with fewer than two points are dropped.
 pub fn parse(doc: &str) -> Result<Vec<Track>, String> {
     let doc = doc.strip_prefix('\u{feff}').unwrap_or(doc);
     let mut tracks = if doc.trim_start().starts_with('<') {
@@ -30,6 +31,11 @@ pub fn parse(doc: &str) -> Result<Vec<Track>, String> {
         collect_geojson(&json, None, &mut tracks);
         tracks
     };
+    for t in &mut tracks {
+        if t.points.iter().any(|p| p.time.is_some()) {
+            t.points.retain(|p| p.time.is_some());
+        }
+    }
     let valid = |p: &Point| (-90.0..=90.0).contains(&p.lat) && (-180.0..=180.0).contains(&p.lon);
     tracks.retain(|t| t.points.len() > 1 && t.points.iter().all(valid));
     Ok(tracks)
@@ -44,25 +50,38 @@ fn parse_gpx(doc: &str) -> Result<Vec<Track>, String> {
         child.text().map(str::trim).map(str::to_owned)
     };
     let tracks = xml.descendants().filter(|n| n.has_tag_name("trkseg") || n.has_tag_name("rte"));
-    Ok(tracks
+    tracks
         .map(|seg| {
             let named = if seg.has_tag_name("rte") { Some(seg) } else { seg.parent() };
             let points = seg.children().filter(|n| n.has_tag_name("trkpt") || n.has_tag_name("rtept"));
-            Track {
+            Ok(Track {
                 name: named.and_then(|n| child_text(n, "name")),
                 points: points
                     .filter_map(|pt| {
-                        Some(Point {
+                        let time = match child_text(pt, "time") {
+                            Some(t) => match gpx_time(&t) {
+                                Some(time) => Some(time),
+                                None => return Some(Err(format!("unreadable <time> {t}"))),
+                            },
+                            None => None,
+                        };
+                        Some(Ok(Point {
                             lon: pt.attribute("lon")?.parse().ok()?,
                             lat: pt.attribute("lat")?.parse().ok()?,
                             ele: child_text(pt, "ele").and_then(|e| e.parse().ok()),
-                            time: child_text(pt, "time").and_then(|t| OffsetDateTime::parse(&t, &Rfc3339).ok()),
-                        })
+                            time,
+                        }))
                     })
-                    .collect(),
-            }
+                    .collect::<Result<_, _>>()?,
+            })
         })
-        .collect())
+        .collect()
+}
+
+/// xsd:dateTime, which GPX uses, may leave out the zone; take that as UTC.
+fn gpx_time(t: &str) -> Option<OffsetDateTime> {
+    let zoneless = format_description!("[year]-[month]-[day]T[hour]:[minute]:[second][optional [.[subsecond]]]");
+    OffsetDateTime::parse(t, &Rfc3339).ok().or_else(|| Some(PrimitiveDateTime::parse(t, zoneless).ok()?.assume_utc()))
 }
 
 /// Walks FeatureCollection / Feature / geometry, taking every line it finds.
@@ -127,7 +146,7 @@ mod tests {
     fn gpx_round_trip() {
         let points = vec![
             Point { lon: -122.6587, lat: 45.5122, ele: Some(15.0), time: Some(datetime!(2026-09-17 20:00 UTC)) },
-            Point { lon: -122.6500, lat: 45.5130, ele: None, time: None },
+            Point { lon: -122.6500, lat: 45.5130, ele: None, time: Some(datetime!(2026-09-17 20:00:01 UTC)) },
         ];
         let tracks = parse(&to_gpx(Some("Fish & <Chips>"), &points)).unwrap();
         assert_eq!(tracks, [Track { name: Some("Fish & <Chips>".into()), points }]);
@@ -153,6 +172,27 @@ mod tests {
         let doc = format!("<gpx><trk><name>n</name><trkseg>{pt}{pt}</trkseg><trkseg>{pt}</trkseg><trkseg>{pt}{pt}{pt}</trkseg></trk></gpx>");
         let lens: Vec<_> = parse(&doc).unwrap().iter().map(|t| t.points.len()).collect();
         assert_eq!(lens, [2, 3]);
+    }
+
+    #[test]
+    fn gpx_times_without_zone_are_utc_and_bad_ones_are_errors() {
+        let pt = |time: &str| format!(r#"<trkpt lat="1" lon="2"><time>{time}</time></trkpt>"#);
+        let doc = |a: &str, b: &str| format!("<gpx><trk><trkseg>{}{}</trkseg></trk></gpx>", pt(a), pt(b));
+        let tracks = parse(&doc("2025-06-01T13:00:00", "2025-06-01T13:00:01.5")).unwrap();
+        let times: Vec<_> = tracks[0].points.iter().map(|p| p.time).collect();
+        assert_eq!(times, [Some(datetime!(2025-06-01 13:00 UTC)), Some(datetime!(2025-06-01 13:00:01.5 UTC))]);
+        assert_eq!(parse(&doc("2025-06-01T13:00:00Z", "yesterday")).unwrap_err(), "unreadable <time> yesterday");
+    }
+
+    #[test]
+    fn partly_timed_track_keeps_only_its_timed_points() {
+        let timed = r#"<trkpt lat="1" lon="2"><time>2025-06-01T13:00:00Z</time></trkpt>"#;
+        let untimed = r#"<trkpt lat="1" lon="3"/>"#;
+        let doc = format!("<gpx><trk><trkseg>{untimed}{timed}{timed}</trkseg><trkseg>{untimed}{untimed}</trkseg></trk></gpx>");
+        let tracks = parse(&doc).unwrap();
+        assert_eq!(tracks.iter().map(|t| t.points.len()).collect::<Vec<_>>(), [2, 2]);
+        assert!(tracks[0].points.iter().all(|p| p.time.is_some()));
+        assert!(tracks[1].points.iter().all(|p| p.time.is_none()));
     }
 
     #[test]

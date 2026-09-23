@@ -13,8 +13,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Params {
-    /// Below this we are "stopped": keep a fix every `slow_rate`, ignore turns
-    /// (GPS course is noise at walking pace).
+    /// Below this we are "stopped": keep the fix where we stop, then one every
+    /// `slow_rate`, and ignore turns (GPS course is noise at walking pace).
     pub low_speed: f64,
     /// At or above this, keep a fix every `fast_rate`.
     pub high_speed: f64,
@@ -46,8 +46,9 @@ impl Default for Params {
 #[derive(Debug, Default)]
 pub struct SmartBeacon {
     params: Params,
-    /// Time (unix seconds) and course of the last kept fix.
-    last: Option<(f64, Option<f64>)>,
+    /// Time (unix seconds), course, and whether we were moving, at the last
+    /// kept fix.
+    last: Option<(f64, Option<f64>, bool)>,
     /// The most recent fix, if it was not kept.
     skipped: Option<Fix>,
 }
@@ -80,20 +81,37 @@ impl SmartBeacon {
             Decision::Keep => vec![fix.clone()],
             Decision::Corner => before.into_iter().chain([fix.clone()]).collect(),
         };
-        self.last = Some((seconds(fix), fix.course));
+        let moving = fix.speed.unwrap_or(0.0) >= self.params.low_speed;
+        self.last = Some((seconds(fix), fix.course, moving));
         self.skipped = None;
         kept
     }
 
+    /// The most recent fix if it was not kept, so a track that ends can still
+    /// be stored up to where we last were.
+    pub fn take_skipped(&mut self) -> Option<Fix> {
+        self.skipped.take()
+    }
+
     fn decide(&self, fix: &Fix) -> Decision {
         let p = &self.params;
-        let Some((last_time, last_course)) = self.last else {
+        let Some((last_time, last_course, was_moving)) = self.last else {
             return Decision::Keep;
         };
         let elapsed = seconds(fix) - last_time;
+        // The source's clock stepped back (restarted, or corrected itself):
+        // start over from here rather than wait for it to catch up.
+        if elapsed < 0.0 {
+            return Decision::Keep;
+        }
         let speed = fix.speed.unwrap_or(0.0);
 
         let rate = if speed < p.low_speed {
+            // Where we come to rest is where the drive ends: keep it now,
+            // since the power may be switched off in a moment.
+            if was_moving {
+                return Decision::Keep;
+            }
             p.slow_rate
         } else {
             if let (Some(now), Some(then)) = (fix.course, last_course) {
@@ -161,6 +179,31 @@ mod tests {
     fn stopped_uses_slow_rate_and_ignores_course_noise() {
         let kept = run((0..=240).map(|t| fix(t, 0.3, (t * 97 % 360) as f64)));
         assert_eq!(kept, [0, 120, 240]);
+    }
+
+    #[test]
+    fn stop_is_kept() {
+        let kept = run((0..=60).map(|t| fix(t, if t < 10 { 30.0 } else { 0.3 }, 90.0)));
+        assert_eq!(kept, [0, 10]);
+        // Stop-and-go: only the first stop after a kept moving fix is pegged.
+        let kept = run((0..=60).map(|t| fix(t, if t < 20 { 13.0 } else if t % 2 == 0 { 0.3 } else { 2.1 }, 90.0)));
+        assert_eq!(kept, [0, 20]);
+    }
+
+    #[test]
+    fn clock_stepping_back_starts_over() {
+        let kept = run([fix(100, 30.0, 90.0), fix(50, 30.0, 90.0), fix(51, 30.0, 90.0), fix(65, 30.0, 90.0)].into_iter());
+        assert_eq!(kept, [100, 50, 65]);
+    }
+
+    #[test]
+    fn last_skipped_fix_can_be_taken() {
+        let mut sb = SmartBeacon::default();
+        for t in 0..5 {
+            sb.push(&fix(t, 0.3, 0.0));
+        }
+        assert_eq!(sb.take_skipped().map(|f| f.time.unix_timestamp()), Some(4));
+        assert!(sb.take_skipped().is_none());
     }
 
     #[test]
