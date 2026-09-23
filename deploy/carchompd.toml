@@ -2,7 +2,9 @@
 
 # Peer authentication over the local socket: no password to keep anywhere.
 database_url = "postgres:///carchomp?host=/var/run/postgresql"
-listen = "0.0.0.0:80"
+# This device and its hotspot; the hotspot address is taken once it is up.
+# install.sh --admin-net makes this ["0.0.0.0:80"] (the firewall then decides).
+listen = ["127.0.0.1:80", "10.42.0.1:80"]
 ui_dir = "/usr/share/carchomp/ui"
 maps_dir = "/var/lib/carchomp/maps"
 gpsd = "127.0.0.1:2947"
@@ -10,5 +12,6 @@ gpsd = "127.0.0.1:2947"
 
 # Only this device and its hotspot (10.42.0.0/24) may use the web UI. To also
 # allow e.g. your home network (anyone on it can manage Wi-Fi and install
-# updates):
+# updates), run deploy/install.sh again with --admin-net 192.168.1.0/24: that
+# adds it here and opens the firewall to it.
 # trusted_networks = ["10.42.0.0/24", "192.168.1.0/24"]

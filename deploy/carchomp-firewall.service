@@ -1,0 +1,23 @@
+[Unit]
+Description=CarChomp firewall: drop inbound traffic the car does not serve
+# Up before any network is (like Debian's nftables.service), without
+# touching other tables: NetworkManager keeps its hotspot NAT rules.
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Without the strict reverse-path rule where the kernel cannot do it (and
+# says so in the journal), rather than not at all.
+ExecStart=/usr/local/lib/carchomp/firewall-load.sh
+# A reload swaps the table in one transaction (the file deletes and remakes
+# it); a restart would leave input open between ExecStop and ExecStart.
+ExecReload=/usr/local/lib/carchomp/firewall-load.sh
+ExecStop=/usr/sbin/nft delete table inet carchomp
+
+[Install]
+WantedBy=sysinit.target
