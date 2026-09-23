@@ -21,9 +21,10 @@ Source of truth for requirements: [stakeholder.md](stakeholder.md).
   gpsd ──────┐
   direwolf ──┤ (KISS/TCP, fed by rtl_fm; receive only)
   rf-geoloc ─┤ (future)            ┌─► recorder ─► PostgreSQL/PostGIS
-  cameras ───┘ (future)            │
-        Source tasks ──► bus ──────┼─► new-road detector ─► bus
-                     (broadcast)   └─► WebSocket hub ─► UI (kiosk + remote)
+  cameras ───┘ (future)            │   (beacon + known-road query)
+        Source tasks ──► bus ──────┤        │ status (watch)
+                     (broadcast)   │        ▼
+                                   └─► WebSocket hub ─► UI (kiosk + remote)
                                        REST (axum) ◄──► PostgreSQL
 ```
 
@@ -40,8 +41,9 @@ The APRS SmartBeaconing algorithm (HamHUD) decides when a moving station is
 worth reporting: slowly when stopped, fast when moving, and immediately when
 turning ("corner pegging"). We apply it to *storage* instead of transmission:
 gpsd delivers 1 Hz fixes, the UI sees all of them live, but only the fixes the
-algorithm selects are written. A straight highway costs one row every ~½ mile;
-a switchback keeps every bend. Tracks stay geometrically faithful at a small
+algorithm selects are written. A straight road above ~8 mph costs one row
+every ~¼ mile (405 m with the default `high_speed` and `fast_rate`); a
+switchback keeps every bend. Tracks stay geometrically faithful at a small
 fraction of the rows.
 
 ## Data model
