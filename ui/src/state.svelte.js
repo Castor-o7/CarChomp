@@ -11,12 +11,22 @@ export const live = $state({
   bulletins: 0, // bumped when a message arrives, so lists know to refresh
 });
 
+// Storage can be blocked (private window, cleared site data); settings then just are not remembered.
+function stored(key) {
+  try {
+    return localStorage[key];
+  } catch {
+    return undefined;
+  }
+}
+
 /** What the person in front of the screen has chosen. */
 export const ui = $state({
   panel: null, // 'tracks' | 'aprs' | 'maps' | 'system' | null
   follow: true,
-  aprs: localStorage.aprs === 'true',
-  metric: localStorage.metric === 'true',
+  aprs: stored('aprs') === 'true',
+  metric: stored('metric') === 'true',
+  chirp: stored('chirp') !== 'false', // sound on entering a new road
   tracksChanged: 0, // bumped whenever stored tracks change
   mapsChanged: 0, // bumped whenever offline regions change
   bounds: [0, 0, 0, 0], // what the map shows: west, south, east, north
@@ -39,7 +49,7 @@ function handle(msg) {
     const { track, road_new } = msg.status;
     live.road = road_new;
     if (track === live.track && !stale) return;
-    if (live.track !== null && track !== live.track) ui.tracksChanged++; // the finished drive is now a stored track
+    if (track !== live.track) ui.tracksChanged++; // a drive started or finished: the stored tracks changed
     live.track = track;
     live.trail = [];
     stale = false;

@@ -67,6 +67,7 @@
     }
   }
 
+  const cancel = (job) => api(`maps/${job.name}`, { method: 'DELETE' }).then(load, report);
   const remove = (archive) =>
     confirm(`Delete ${archive.name}?`) && api(`maps/${archive.name}`, { method: 'DELETE' }).then(() => (ui.mapsChanged++, load()), report);
 </script>
@@ -85,9 +86,12 @@
 
 {#if error}<p class="error">{error}</p>{/if}
 {#if maps.job}
-  <p class:error={maps.job.error}>
-    {maps.job.name}: {maps.job.error ?? `downloading… ${mb(maps.job.bytes)}`}
-  </p>
+  <section>
+    <p class:error={maps.job.error}>
+      {maps.job.name}: {maps.job.error ?? `downloading… ${mb(maps.job.bytes)}`}
+    </p>
+    {#if downloading}<button onclick={() => cancel(maps.job)}>Cancel</button>{/if}
+  </section>
 {/if}
 
 {#each maps.archives as archive (archive.name)}

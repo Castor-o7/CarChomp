@@ -16,7 +16,13 @@
     // Deliberately not reactive to every fix: "nearby" means near where we
     // were when the list was opened or last refreshed.
     const fix = nearby ? untrack(() => live.fix) : null;
-    api(fix ? `tracks?near=${fix.lon},${fix.lat},${NEARBY_METRES}` : 'tracks').then((t) => (tracks = t), report);
+    // A slower answer to an earlier request must not replace this one.
+    let stale = false;
+    api(fix ? `tracks?near=${fix.lon},${fix.lat},${NEARBY_METRES}` : 'tracks').then(
+      (t) => stale || (tracks = t),
+      (e) => stale || report(e),
+    );
+    return () => (stale = true);
   });
 
   const report = (e) => (error = e.message);
@@ -40,6 +46,7 @@
 <header>
   <button class:on={nearby} onclick={() => (nearby = !nearby)}>Nearby</button>
   <label class="button">Import<input type="file" accept=".gpx,.json,.geojson" multiple hidden onchange={upload} /></label>
+  <a class="button" href="/api/tracks/export.gpx" download>Export all</a>
 </header>
 
 {#if error}<p class="error">{error}</p>{/if}

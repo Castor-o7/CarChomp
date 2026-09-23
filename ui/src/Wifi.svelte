@@ -4,6 +4,7 @@
   let wifi = $state(null); // null: not available on this host
   let joining = $state(null); // the secured network being typed into
   let password = $state('');
+  let identity = $state(''); // user name, for WPA-Enterprise networks
   let busy = $state(false);
   let error = $state('');
 
@@ -21,6 +22,7 @@
     busy = false;
     joining = null;
     password = '';
+    identity = '';
     await load();
   }
   const post = (body) => api('wifi', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
@@ -45,13 +47,18 @@
     </section>
     {#if joining === network.ssid}
       <!-- Joining from a phone on the hotspot drops that phone: one radio. -->
-      <form onsubmit={(e) => (e.preventDefault(), run(post({ ssid: network.ssid, password })))}>
-        <input type="password" bind:value={password} placeholder="Password" minlength="8" required />
+      <form onsubmit={(e) => (e.preventDefault(), run(post(network.enterprise ? { ssid: network.ssid, identity, password } : { ssid: network.ssid, password })))}>
+        {#if network.enterprise}<input bind:value={identity} placeholder="Identity" autocomplete="username" required />{/if}
+        <input type="password" bind:value={password} placeholder="Password" minlength={network.enterprise ? 1 : 8} required />
         <button disabled={busy}>Connect</button>
       </form>
     {/if}
   {:else}
-    <p>No networks in range.</p>
+    <p>
+      {wifi.hotspot
+        ? 'The car cannot scan for networks while it is hosting its hotspot. Nearby networks appear here when no one is connected to it.'
+        : 'No networks in range.'}
+    </p>
   {/each}
 {/if}
 
@@ -66,6 +73,9 @@
     gap: 8px;
     align-items: center;
     margin-top: 12px;
+  }
+  form {
+    flex-wrap: wrap;
   }
   span,
   input {

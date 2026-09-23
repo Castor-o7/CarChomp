@@ -1,5 +1,5 @@
 <script>
-  import { api, live } from './state.svelte.js';
+  import { api, live, ui } from './state.svelte.js';
   import Wifi from './Wifi.svelte';
 
   let health = $state(null);
@@ -9,6 +9,41 @@
     const timer = setInterval(load, 5000);
     return () => clearInterval(timer);
   });
+
+  // Updating: the bundle is uploaded to the daemon, which has a root-owned
+  // unit install it; that restarts the daemon, so the status is polled.
+  let update = $state(null); // /var/lib/carchomp/update/status.json, or {state: 'idle'}
+  let sent = $state(null); // share of the upload sent, while sending
+  let updateError = $state('');
+  const PHASE = { running: 'Installing', done: 'Installed', failed: 'Failed' };
+  $effect(() => {
+    const load = () => api('system/update').then((u) => (update = u), () => {});
+    load();
+    const timer = setInterval(load, 2000);
+    return () => clearInterval(timer);
+  });
+
+  function install(event) {
+    const file = event.target.files[0];
+    event.target.value = '';
+    if (!file || !confirm(`Install ${file.name}? CarChomp restarts while it installs, so this screen goes offline for a minute or two.`)) return;
+    updateError = '';
+    sent = 0;
+    // fetch() cannot report upload progress; XMLHttpRequest can.
+    const request = new XMLHttpRequest();
+    request.open('POST', '/api/system/update');
+    request.setRequestHeader('content-type', 'application/gzip');
+    request.upload.onprogress = (e) => e.lengthComputable && (sent = e.loaded / e.total);
+    request.onload = () => {
+      sent = null;
+      if (request.status !== 202) updateError = request.responseText || request.statusText;
+    };
+    request.onerror = () => {
+      sent = null;
+      updateError = 'Upload failed.';
+    };
+    request.send(file);
+  }
 
   const fix = $derived(live.fix);
   const sys = $derived(health?.system ?? {});
@@ -55,6 +90,23 @@
   {/if}
 </dl>
 
+<h2>Settings</h2>
+<button class:on={ui.chirp} onclick={() => (ui.chirp = !ui.chirp)}>Chirp on a new road</button>
+
+<h2>Software update</h2>
+<p>Choose a release bundle (carchomp-….tar.gz). The CarChomp service restarts while it installs, so this screen goes offline for a minute or two.</p>
+<label class="button" class:disabled={sent !== null || update?.state === 'running'}>
+  Install update<input type="file" accept=".gz,.tgz,application/gzip" hidden disabled={sent !== null || update?.state === 'running'} onchange={install} />
+</label>
+{#if sent !== null}<progress max="1" value={sent}></progress>{/if}
+{#if updateError}<p class="error">{updateError}</p>{/if}
+{#if update && update.state !== 'idle'}
+  <p class:error={update.state === 'failed'}>
+    {PHASE[update.state] ?? update.state}{update.version ? ` ${update.version}` : ''}{update.message ? `: ${update.message}` : ''}
+  </p>
+  {#if update.log}<details open={update.state === 'failed'}><summary>Log</summary><pre>{update.log}</pre></details>{/if}
+{/if}
+
 <Wifi />
 
 <style>
@@ -65,5 +117,28 @@
   dd {
     margin: 0;
     font-size: 1.2rem;
+  }
+  h2 {
+    margin: 28px 0 12px;
+    font-size: 1.2rem;
+  }
+  p {
+    color: var(--muted);
+  }
+  .error {
+    color: #fca5a5;
+  }
+  .disabled {
+    opacity: 0.5;
+  }
+  progress {
+    display: block;
+    width: 100%;
+    margin-top: 12px;
+  }
+  pre {
+    font-size: 0.8rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 </style>

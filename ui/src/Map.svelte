@@ -3,7 +3,7 @@
   import maplibregl from 'maplibre-gl';
   import 'maplibre-gl/dist/maplibre-gl.css';
   import { PMTiles, Protocol } from 'pmtiles';
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { describe } from './aprs.js';
   import { api, live, ui } from './state.svelte.js';
 
@@ -134,7 +134,8 @@
 
   $effect(() => {
     ui.tracksChanged;
-    if (ready) loadTracks(true);
+    // untrack: loadTracks reads ui.bounds, and moved() already reloads on every move.
+    if (ready) untrack(() => loadTracks(true));
   });
 
   $effect(() => {
@@ -165,9 +166,10 @@
   });
 
   // An open side panel covers part of the map; centre things in what is left.
+  // At once, not eased: Follow's next ease would stop a padding ease halfway.
   $effect(() => {
     const right = ui.panel && innerWidth > 700 ? 440 : 0;
-    map.easeTo({ padding: { right }, duration: 200 });
+    map.setPadding({ right });
   });
 
   // Zoom to a feature once, when asked; style rebuilds must not repeat it.
