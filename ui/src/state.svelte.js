@@ -30,22 +30,28 @@ export async function api(path, options) {
 }
 
 const MAX_TRAIL = 20_000;
+const STATION_WINDOW = 60 * 60_000; // ms; the same hour /api/aprs/stations covers
+
+let stale = true; // the trail must be rebuilt from the database: at start and after every reconnect
 
 function handle(msg) {
   if (msg.status) {
     const { track, road_new } = msg.status;
     live.road = road_new;
-    if (track === live.track) return;
-    if (live.track !== null) ui.tracksChanged++; // the finished drive is now a stored track
+    if (track === live.track && !stale) return;
+    if (live.track !== null && track !== live.track) ui.tracksChanged++; // the finished drive is now a stored track
     live.track = track;
     live.trail = [];
+    stale = false;
     if (track !== null) {
       // Joining a drive in progress: start from what has been stored of it.
       api(`tracks/${track}`).then((f) => (live.trail = [...(f.geometry?.coordinates ?? []), ...live.trail]), () => {});
     }
   } else if (msg.obs.type === 'fix') {
     live.fix = msg.obs;
-    if (live.track !== null && live.trail.length < MAX_TRAIL) {
+    if (live.track !== null) {
+      // A long drive outgrows the trail: halve it rather than stop drawing the tail.
+      if (live.trail.length >= MAX_TRAIL) live.trail = live.trail.filter((_, i) => i % 2);
       live.trail.push([msg.obs.lon, msg.obs.lat]);
     }
   } else if (msg.obs.type === 'aprs') {
@@ -70,8 +76,18 @@ function connect() {
   socket.onmessage = (event) => handle(JSON.parse(event.data));
   socket.onclose = () => {
     live.connected = false;
+    stale = true;
     setTimeout(connect, 2000);
   };
 }
 
 connect();
+
+// Stations fall off the map once unheard for an hour, as they do in the database.
+// They become null rather than being deleted, so an older stored copy cannot come back.
+setInterval(() => {
+  const cutoff = Date.now() - STATION_WINDOW;
+  for (const [name, f] of Object.entries(live.stations)) {
+    if (f && Date.parse(f.properties.time) < cutoff) live.stations[name] = null;
+  }
+}, 60_000);
