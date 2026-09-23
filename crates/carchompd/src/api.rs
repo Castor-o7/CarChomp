@@ -659,7 +659,7 @@ mod tests {
         assert_eq!(Net::parse("10.42.0.0/24"), Some(Net { addr: ip("10.42.0.0"), prefix: 24 }));
         assert_eq!(Net::parse(" 192.168.1.5 "), Some(Net { addr: ip("192.168.1.5"), prefix: 32 }));
         assert_eq!(Net::parse("fd00::/8"), Some(Net { addr: ip("fd00::"), prefix: 8 }));
- assert_eq!(Net::parse("::ffff:10.0.0.0/104"), Some(Net { addr: ip("10.0.0.0"), prefix: 8 }));
+        assert_eq!(Net::parse("::ffff:10.0.0.0/104"), Some(Net { addr: ip("10.0.0.0"), prefix: 8 }));
         for bad in ["::ffff:10.0.0.0/64", "", "10.42.0.0/33", "fd00::/129", "10.42.0/24", "10.42.0.0/", "/24", "10.42.0.0/-1", "host.local/24"] {
             assert_eq!(Net::parse(bad), None, "{bad}");
         }
@@ -697,6 +697,39 @@ mod tests {
             assert!(!peer_allowed(&hotspot, ip(peer)), "{peer}");
         }
         assert!(peer_allowed(&[], ip("::1")) && !peer_allowed(&[], ip("10.42.0.2")));
+    }
+
+    /// Through axum as main() wires it: the peer comes from ConnectInfo, and
+    /// the fallback (the static UI) is covered like the API.
+    #[tokio::test]
+    async fn untrusted_peers_get_403_on_every_path() {
+        use axum::extract::connect_info::MockConnectInfo;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let hotspot = Arc::new(networks(&["10.42.0.0/24".into()]).unwrap());
+        for (peer, path, status) in [
+            ("192.168.1.20:40000", "/api/health", "403"),
+            ("192.168.1.20:40000", "/index.html", "403"),
+            ("[fe80::1]:40000", "/api/health", "403"),
+            ("10.42.0.7:40000", "/api/health", "200"),
+            ("[::ffff:10.42.0.7]:40000", "/index.html", "200"),
+            ("127.0.0.1:40000", "/api/health", "200"),
+        ] {
+            let app = Router::new()
+                .route("/api/health", get(|| async { "ok" }))
+                .fallback(|| async { "ui" })
+                .layer(middleware::from_fn_with_state(hotspot.clone(), trusted_peer))
+                .layer(MockConnectInfo(peer.parse::<SocketAddr>().unwrap()));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, app).await });
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with(&format!("HTTP/1.1 {status} ")), "{peer} {path}: {response}");
+            assert_eq!(status == "403", response.contains("trusted_networks"), "{peer} {path}");
+        }
     }
 
     #[test]
