@@ -8,11 +8,15 @@ listen = "0.0.0.0:8000"
 # Or several: listen = ["127.0.0.1:80", "10.42.0.1:80"] (the installed
 # default). An address this machine does not have yet, like the hotspot's
 # while it is down, is bound as soon as it appears.
+# deploy/install.sh also installs a firewall that lets only the hotspot
+# (10.42.0.0/24) and --admin-net networks reach the web UI, whatever this says.
 ui_dir = "/usr/share/carchomp/ui"   # default: none (no web UI is served)
 
 # Who may use the web UI and the API: these networks (CIDR) plus this machine
 # (loopback), always. Anyone else gets 403. The default is the hotspot's
-# subnet; add e.g. "192.168.1.0/24" to allow your home network.
+# subnet. On an installed car, add e.g. your home network with
+# `deploy/install.sh --admin-net 192.168.77.0/24`: that adds it here and to the
+# firewall, and makes listen ["0.0.0.0:80"] (README, "Who can use it").
 trusted_networks = ["10.42.0.0/24"]
 
 # Offline maps: *.pmtiles regions, plus assets/ (fonts, sprites; see

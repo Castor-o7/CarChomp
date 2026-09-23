@@ -114,7 +114,9 @@ firewall (web UI and mDNS), to `trusted_networks`, and `listen` becomes
 recorded in `/etc/carchomp/install.env`, so `--reuse` and updates keep it; a
 run without it closes those networks again. An install from before the
 firewall had no `--admin-net`: its first update takes the networks from
-`trusted_networks` instead, so nobody who used the UI loses it.
+`trusted_networks` instead, so nobody who used the UI loses it, except from
+a network wider than /16 (or `0.0.0.0/0`), which the firewall no longer
+opens to (the update says so).
 
 The car trusts the address range, not the network: every network it joins
 that uses the same range is an admin network too. `192.168.1.0/24`,
