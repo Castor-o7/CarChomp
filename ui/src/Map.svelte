@@ -11,13 +11,19 @@
   // Incidents (objects) stand out; weather is calm; everything else is a station.
   const APRS_COLOR = ['match', ['get', 'kind'], 'object', '#9333ea', 'weather', '#0ea5e9', '#dc2626'];
 
-  maplibregl.addProtocol('pmtiles', new Protocol().tile);
+  // Keeps one reader per archive URL; a region downloaded again under the
+  // same name has the same URL, so readers are dropped on every rebuild.
+  const protocol = new Protocol();
+  maplibregl.addProtocol('pmtiles', protocol.tile);
 
   // Online OpenStreetMap tiles are always the bottom layer. Offline regions
   // are drawn over them, least detailed first, so wherever a region has been
   // downloaded the network is not needed, and elsewhere it is used if there.
+  // Coarse regions step aside a little past their detail, so they do not
+  // cover the online streets at street zoom.
   async function buildStyle() {
     const { archives } = await api('maps').catch(() => ({ archives: [] }));
+    protocol.tiles.clear();
     const regions = await Promise.all(
       archives.map(async ({ name }) => {
         const url = `${location.origin}/maps/${name}.pmtiles`;
@@ -33,14 +39,18 @@
       sprite: `${location.origin}/maps/assets/sprites/v4/light`,
       sources: {
         osm: { type: 'raster', tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256, maxzoom: 19, attribution: '© OpenStreetMap contributors' },
-        ...Object.fromEntries(usable.map((r) => [r.name, { type: 'vector', url: `pmtiles://${r.url}` }])),
+        ...Object.fromEntries(usable.map((r) => [`region:${r.name}`, { type: 'vector', url: `pmtiles://${r.url}` }])),
       },
       layers: [
         { id: 'osm', type: 'raster', source: 'osm' },
         ...usable.flatMap((r) =>
-          layers(r.name, flavor, { lang: 'en' })
+          layers(`region:${r.name}`, flavor, { lang: 'en' })
             .filter((layer) => layer.type !== 'background')
-            .map((layer) => ({ ...layer, id: `${r.name}/${layer.id}` })),
+            .map((layer) => ({
+              ...layer,
+              id: `${r.name}/${layer.id}`,
+              ...(r.maxZoom < 15 && { maxzoom: Math.min(layer.maxzoom ?? 24, r.maxZoom + 3) }),
+            })),
         ),
       ],
     };
@@ -53,7 +63,8 @@
 
   onMount(() => {
     const blank = { version: 8, sources: {}, layers: [] };
-    map = new maplibregl.Map({ container, style: blank, center: [-122.66, 45.51], zoom: 13, attributionControl: { compact: true } });
+    map = new maplibregl.Map({ container, style: blank, center: [-122.66, 45.51], zoom: 13, attributionControl: { compact: true }, dragRotate: false, touchPitch: false, pitchWithRotate: false });
+    map.touchZoomRotate.disableRotation(); // a stray second finger must not leave north lost
 
     const arrow = document.createElement('div');
     arrow.innerHTML =
@@ -75,14 +86,15 @@
     const moved = () => {
       const b = map.getBounds();
       ui.bounds = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
-      if (ready) loadTracks();
+      if (ready) loadTracks(false);
     };
     map.on('moveend', moved);
     moved();
     map.on('dragstart', () => (ui.follow = false));
     map.on('click', 'aprs', (e) => {
-      const lines = describe(e.features[0].properties, ui.metric);
-      new maplibregl.Popup({ closeButton: false }).setLngLat(e.lngLat).setText(lines.join('\n')).addTo(map);
+      const content = document.createElement('div');
+      for (const line of describe(e.features[0].properties, ui.metric)) content.appendChild(document.createElement('div')).textContent = line;
+      new maplibregl.Popup({ closeButton: false }).setLngLat(e.lngLat).setDOMContent(content).addTo(map);
     });
     return () => map.remove();
   });
@@ -97,14 +109,26 @@
     });
   });
 
-  async function loadTracks() {
-    const bbox = ui.bounds.map((n) => n.toFixed(5));
-    map.getSource('tracks')?.setData(await api(`segments?bbox=${bbox}`).catch(() => EMPTY));
+  // Fetches a padded box so small moves (Follow eases every fix) reuse it;
+  // only the newest request's answer is drawn.
+  let fetched = null;
+  let requests = 0;
+  async function loadTracks(force) {
+    const [w, s, e, n] = ui.bounds;
+    if (!force && fetched && w >= fetched[0] && s >= fetched[1] && e <= fetched[2] && n <= fetched[3]) return;
+    const dx = (e - w) / 2;
+    const dy = (n - s) / 2;
+    const box = [w - dx, s - dy, e + dx, n + dy];
+    const request = ++requests;
+    const data = await api(`segments?bbox=${box.map((x) => x.toFixed(5))}`).catch(() => null);
+    if (request !== requests) return;
+    fetched = data && box;
+    map.getSource('tracks')?.setData(data ?? EMPTY);
   }
 
   $effect(() => {
     ui.tracksChanged;
-    if (ready) loadTracks();
+    if (ready) loadTracks(true);
   });
 
   $effect(() => {
@@ -140,11 +164,13 @@
     map.easeTo({ padding: { right }, duration: 200 });
   });
 
+  // Zoom to a feature once, when asked; style rebuilds must not repeat it.
   $effect(() => {
     const line = ui.focus?.geometry?.coordinates;
     if (!ready || !line?.length) return;
     const bounds = line.reduce((b, c) => b.extend(c), new maplibregl.LngLatBounds(line[0], line[0]));
     ui.follow = false;
+    ui.focus = null;
     map.fitBounds(bounds, { padding: 60, maxZoom: 16 });
   });
 </script>
