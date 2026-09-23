@@ -32,8 +32,11 @@ pub struct Tpv {
 }
 
 /// Parse one line from gpsd. `None` for anything that is not a usable fix.
+/// Some gpsd/driver combinations leak C `nan`/`inf` into the JSON; those
+/// fields are treated as absent rather than discarding the whole fix.
 pub fn parse_fix(line: &str) -> Option<Fix> {
-    let Ok(Report::TPV(t)) = serde_json::from_str(line) else {
+    let report = serde_json::from_str(line).or_else(|_| serde_json::from_str(&without_non_finite(line)));
+    let Ok(Report::TPV(t)) = report else {
         return None;
     };
     if t.mode < 2 {
@@ -48,6 +51,10 @@ pub fn parse_fix(line: &str) -> Option<Fix> {
         course: t.track,
         h_err: t.eph,
     })
+}
+
+fn without_non_finite(line: &str) -> String {
+    ["-nan", "-inf", "nan", "inf"].iter().fold(line.to_owned(), |s, t| s.replace(&format!(":{t}"), ":null"))
 }
 
 #[cfg(test)]
@@ -68,5 +75,13 @@ mod tests {
         assert!(parse_fix(r#"{"class":"SKY","satellites":[]}"#).is_none());
         assert!(parse_fix(r#"{"class":"TPV","mode":1}"#).is_none());
         assert!(parse_fix("garbage").is_none());
+    }
+
+    #[test]
+    fn non_finite_fields_are_dropped_not_the_fix() {
+        let line = r#"{"class":"TPV","mode":3,"time":"2026-09-17T20:00:00.000Z","lat":45.5,"lon":-122.6,"climb":nan,"track":-inf,"speed":1.5}"#;
+        let fix = parse_fix(line).unwrap();
+        assert_eq!(fix.course, None);
+        assert_eq!(fix.speed, Some(1.5));
     }
 }

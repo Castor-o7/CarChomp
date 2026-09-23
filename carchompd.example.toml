@@ -3,6 +3,8 @@
 
 database_url = "postgres://carchomp@localhost/carchomp"
 listen = "0.0.0.0:8000"
+# 8000 is also Direwolf's default AGW port. On a host that runs both, set
+# `AGWPORT 0` in direwolf.conf or listen on another port.
 # ui_dir = "/usr/share/carchomp/ui"
 
 # Offline maps: *.pmtiles regions, plus assets/ (fonts, sprites; see
@@ -10,7 +12,8 @@ listen = "0.0.0.0:8000"
 maps_dir = "/var/lib/carchomp/maps"
 # map_source = "https://build.protomaps.com/20260917.pmtiles"  # default: latest build
 
-# Sources. Remove a line to disable that source.
+# Sources. aprs_kiss is off unless set. gpsd is always on: removing the
+# line falls back to the address below rather than disabling it.
 gpsd = "127.0.0.1:2947"
 # aprs_kiss = "127.0.0.1:8001"   # Direwolf KISS port, fed by rtl_fm (default: off)
 

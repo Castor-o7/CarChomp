@@ -21,6 +21,7 @@ pub struct Point {
 /// Parse a GPX or GeoJSON document, whichever it turns out to be. Tracks with
 /// fewer than two points are dropped.
 pub fn parse(doc: &str) -> Result<Vec<Track>, String> {
+    let doc = doc.strip_prefix('\u{feff}').unwrap_or(doc);
     let mut tracks = if doc.trim_start().starts_with('<') {
         parse_gpx(doc)?
     } else {
@@ -95,6 +96,11 @@ pub fn to_gpx(name: Option<&str>, points: &[Point]) -> String {
          <gpx version=\"1.1\" creator=\"carchomp\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n<trk>\n",
     );
     if let Some(name) = name {
+        // Control characters other than tab/newline, and U+FFFE/U+FFFF, are not XML 1.0 Chars.
+        let name: String = name
+            .chars()
+            .filter(|&c| (c >= ' ' || matches!(c, '\t' | '\n' | '\r')) && !matches!(c, '\u{fffe}' | '\u{ffff}'))
+            .collect();
         let escaped = name.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
         gpx += &format!("<name>{escaped}</name>\n");
     }
@@ -125,6 +131,20 @@ mod tests {
         ];
         let tracks = parse(&to_gpx(Some("Fish & <Chips>"), &points)).unwrap();
         assert_eq!(tracks, [Track { name: Some("Fish & <Chips>".into()), points }]);
+    }
+
+    #[test]
+    fn gpx_with_bom_is_still_gpx() {
+        let pt = r#"<trkpt lat="1" lon="2"/>"#;
+        let doc = format!("\u{feff}<?xml version=\"1.0\"?><gpx><trk><trkseg>{pt}{pt}</trkseg></trk></gpx>");
+        assert_eq!(parse(&doc).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn control_characters_in_name_are_dropped() {
+        let points = vec![Point { lon: 1.0, lat: 2.0, ele: None, time: None }, Point { lon: 3.0, lat: 4.0, ele: None, time: None }];
+        let tracks = parse(&to_gpx(Some("Trip\u{1}\u{ffff}\u{7f}"), &points)).unwrap();
+        assert_eq!(tracks[0].name.as_deref(), Some("Trip\u{7f}"));
     }
 
     #[test]

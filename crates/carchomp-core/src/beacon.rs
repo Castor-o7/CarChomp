@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 /// Units are SI: metres per second, seconds, degrees.
 #[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Params {
     /// Below this we are "stopped": keep a fix every `slow_rate`, ignore turns
     /// (GPS course is noise at walking pace).
@@ -102,7 +102,8 @@ impl SmartBeacon {
                     return Decision::Corner;
                 }
             }
-            (p.fast_rate * p.high_speed / speed).clamp(p.fast_rate, p.slow_rate)
+            // max/min rather than clamp: clamp panics if the config has them reversed.
+            (p.fast_rate * p.high_speed / speed).max(p.fast_rate).min(p.slow_rate)
         };
         if elapsed >= rate { Decision::Keep } else { Decision::Skip }
     }
@@ -174,5 +175,21 @@ mod tests {
         // threshold at 15 m/s = 10 + 110/15 = 17.3 degrees
         let kept = run((0..10).map(|t| fix(t, 15.0, 90.0 + t as f64)));
         assert_eq!(kept, [0]);
+    }
+
+    #[test]
+    fn misspelt_param_is_rejected() {
+        assert!(serde_json::from_str::<Params>(r#"{"fastrate": 5}"#).is_err());
+        assert_eq!(serde_json::from_str::<Params>(r#"{"fast_rate": 5}"#).unwrap().fast_rate, 5.0);
+    }
+
+    #[test]
+    fn reversed_or_nan_rates_do_not_panic() {
+        for (fast, slow) in [(60.0, 30.0), (f64::NAN, 120.0), (15.0, f64::NAN)] {
+            let mut sb = SmartBeacon::new(Params { fast_rate: fast, slow_rate: slow, ..Params::default() });
+            for t in 0..=200 {
+                sb.push(&fix(t, 30.0, 90.0));
+            }
+        }
     }
 }
