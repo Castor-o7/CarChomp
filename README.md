@@ -39,7 +39,7 @@ in `ui/` proxies to the daemon with hot reload. The API by hand:
     curl localhost:8000/api/tracks/1                     # GeoJSON
     curl 'localhost:8000/api/tracks?near=-122.6587,45.5125,50'
 
-`cargo test` runs the core tests; they need nothing but a Rust toolchain (1.85+).
+`cargo test` runs the core tests; they need nothing but a Rust toolchain (1.88+).
 
 ## Install on a Pi
 
