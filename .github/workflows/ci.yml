@@ -1,7 +1,19 @@
 name: CI
 on:
+  # Pushes to main, plus every PR. Without the branch filter, a push to a PR
+  # branch runs CI twice (once for the push, once for the PR).
   push:
+    branches: [main]
   pull_request:
+
+# Read-only token: CI only needs to check out code.
+permissions:
+  contents: read
+
+# A new push to the same PR cancels the run it supersedes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rust:
@@ -9,6 +21,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # Caches ~/.cargo and target/ between runs, keyed on Cargo.lock.
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
 
   ui:

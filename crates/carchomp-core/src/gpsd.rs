@@ -42,7 +42,8 @@ const GPS_WEEK_ROLLOVER: Duration = Duration::weeks(1024);
 /// Some gpsd/driver combinations leak C `nan`/`inf` into the JSON; those
 /// fields are treated as absent rather than discarding the whole fix.
 pub fn parse_fix(line: &str) -> Option<Fix> {
-    let report = serde_json::from_str(line).or_else(|_| serde_json::from_str(&without_non_finite(line)));
+    let report =
+        serde_json::from_str(line).or_else(|_| serde_json::from_str(&without_non_finite(line)));
     let Ok(Report::TPV(t)) = report else {
         return None;
     };
@@ -80,12 +81,15 @@ impl Partials {
             self.last_speed = Some(fix.time);
             return false;
         }
-        self.last_speed.is_some_and(|t| (fix.time - t).abs() <= Duration::seconds(2))
+        self.last_speed
+            .is_some_and(|t| (fix.time - t).abs() <= Duration::seconds(2))
     }
 }
 
 fn without_non_finite(line: &str) -> String {
-    ["-nan", "-inf", "nan", "inf"].iter().fold(line.to_owned(), |s, t| s.replace(&format!(":{t}"), ":null"))
+    ["-nan", "-inf", "nan", "inf"]
+        .iter()
+        .fold(line.to_owned(), |s, t| s.replace(&format!(":{t}"), ":null"))
 }
 
 #[cfg(test)]
@@ -110,23 +114,39 @@ mod tests {
 
     #[test]
     fn week_rollover_is_undone_and_nonsense_dates_dropped() {
-        let at = |time: &str| parse_fix(&format!(r#"{{"class":"TPV","mode":3,"time":"{time}","lat":45.5,"lon":-122.6}}"#));
+        let at = |time: &str| {
+            parse_fix(&format!(
+                r#"{{"class":"TPV","mode":3,"time":"{time}","lat":45.5,"lon":-122.6}}"#
+            ))
+        };
         // 2007-02-05 + 1024 weeks.
-        assert_eq!(at("2007-02-05T12:00:00Z").unwrap().time, datetime!(2026-09-21 12:00 UTC));
+        assert_eq!(
+            at("2007-02-05T12:00:00Z").unwrap().time,
+            datetime!(2026-09-21 12:00 UTC)
+        );
         assert!(at("1980-01-06T00:00:00Z").is_none());
-        assert_eq!(at("2026-09-17T20:00:00Z").unwrap().time, datetime!(2026-09-17 20:00 UTC));
+        assert_eq!(
+            at("2026-09-17T20:00:00Z").unwrap().time,
+            datetime!(2026-09-17 20:00 UTC)
+        );
     }
 
     #[test]
     fn partial_tpv_is_ignored_while_speed_is_reported() {
-        let gga = parse_fix(r#"{"class":"TPV","mode":3,"time":"2026-09-17T20:00:00Z","lat":45.5,"lon":-122.6}"#).unwrap();
+        let gga = parse_fix(
+            r#"{"class":"TPV","mode":3,"time":"2026-09-17T20:00:00Z","lat":45.5,"lon":-122.6}"#,
+        )
+        .unwrap();
         let rmc = parse_fix(r#"{"class":"TPV","mode":3,"time":"2026-09-17T20:00:00Z","lat":45.5,"lon":-122.6,"speed":25.0,"track":90.0}"#).unwrap();
         let mut p = Partials::default();
         // Until speed has been seen, a fix without it may be all there is.
         assert!(!p.is_partial(&gga));
         assert!(!p.is_partial(&rmc));
         assert!(p.is_partial(&gga));
-        let later = Fix { time: gga.time + Duration::seconds(10), ..gga };
+        let later = Fix {
+            time: gga.time + Duration::seconds(10),
+            ..gga
+        };
         assert!(!p.is_partial(&later));
     }
 

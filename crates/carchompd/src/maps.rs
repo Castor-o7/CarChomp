@@ -14,9 +14,9 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    os::unix::fs::MetadataExt,
     path::{Path as FsPath, PathBuf},
     process::Stdio,
-    os::unix::fs::MetadataExt,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -63,8 +63,13 @@ pub fn router(dir: PathBuf, source: Option<String>) -> Router {
             let _ = std::fs::remove_file(entry.path());
         }
     }
-    if let Some(s) = source.as_ref().filter(|s| !(s.starts_with("https://") || s.starts_with("http://") || s.starts_with('/'))) {
-        tracing::warn!("maps: map_source {s:?} is neither a URL nor an absolute path; pmtiles will likely reject it");
+    if let Some(s) = source
+        .as_ref()
+        .filter(|s| !(s.starts_with("https://") || s.starts_with("http://") || s.starts_with('/')))
+    {
+        tracing::warn!(
+            "maps: map_source {s:?} is neither a URL nor an absolute path; pmtiles will likely reject it"
+        );
     }
     Router::new()
         .route("/api/maps", get(list).post(download))
@@ -72,7 +77,11 @@ pub fn router(dir: PathBuf, source: Option<String>) -> Router {
         .route_layer(middleware::from_fn(crate::api::same_origin))
         .nest_service("/maps", ServeDir::new(&dir))
         .layer(middleware::from_fn(hide_partial))
-        .with_state(Maps { dir, source, job: Arc::default() })
+        .with_state(Maps {
+            dir,
+            source,
+            job: Arc::default(),
+        })
 }
 
 /// Where downloads are written until complete: inside `maps_dir`, so the
@@ -99,7 +108,10 @@ impl Maps {
 
 /// Names become file names and command arguments, so keep them boring.
 fn valid_name(name: &str) -> bool {
-    (1..=64).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 /// Client-supplied sources may only be a Protomaps daily build, so a client
@@ -119,14 +131,18 @@ fn tiles([w, s, e, n]: [f64; 4], maxzoom: u8) -> f64 {
     (0..=maxzoom)
         .map(|z| {
             let count = f64::from(1u32 << z);
-            let span = |a: f64, b: f64| ((b * count).floor().min(count - 1.0) - (a * count).floor()).max(0.0) + 1.0;
+            let span = |a: f64, b: f64| {
+                ((b * count).floor().min(count - 1.0) - (a * count).floor()).max(0.0) + 1.0
+            };
             span((w + 180.0) / 360.0, (e + 180.0) / 360.0) * span(y(n), y(s))
         })
         .sum()
 }
 
 fn free_bytes(dir: &FsPath) -> Option<u64> {
-    rustix::fs::statvfs(dir).ok().map(|d| d.f_bavail * d.f_frsize)
+    rustix::fs::statvfs(dir)
+        .ok()
+        .map(|d| d.f_bavail * d.f_frsize)
 }
 
 fn size(path: PathBuf) -> u64 {
@@ -138,7 +154,9 @@ fn size(path: PathBuf) -> u64 {
 /// says nothing about progress; on a filesystem with sparse files, the
 /// allocated blocks do. Never more than the length.
 fn written(path: &FsPath) -> Option<(u64, u64)> {
-    std::fs::metadata(path).ok().map(|m| ((m.blocks() * 512).min(m.len()), m.len()))
+    std::fs::metadata(path)
+        .ok()
+        .map(|m| ((m.blocks() * 512).min(m.len()), m.len()))
 }
 
 /// Notices a download that has stopped writing.
@@ -149,7 +167,10 @@ struct Stall {
 
 impl Stall {
     fn new(now: Instant) -> Stall {
-        Stall { written: 0, since: now }
+        Stall {
+            written: 0,
+            since: now,
+        }
     }
 
     /// Feed one sample of `written` (None: no file yet). True once nothing
@@ -174,7 +195,8 @@ async fn list(State(maps): State<Maps>) -> Response {
         .filter_map(|entry| {
             let path = entry.path();
             let name = path.file_stem()?.to_str()?.to_owned();
-            (path.extension()? == "pmtiles").then(|| serde_json::json!({ "name": name, "bytes": size(path) }))
+            (path.extension()? == "pmtiles")
+                .then(|| serde_json::json!({ "name": name, "bytes": size(path) }))
         })
         .collect();
     archives.sort_by_key(|a| a["name"].as_str().map(str::to_owned));
@@ -183,7 +205,8 @@ async fn list(State(maps): State<Maps>) -> Response {
         let bytes = written(&maps.partial(&job.name)).map_or(0, |(written, _)| written);
         serde_json::json!({ "name": job.name, "error": job.error, "bytes": bytes })
     });
-    Json(serde_json::json!({ "archives": archives, "job": job, "source": maps.source })).into_response()
+    Json(serde_json::json!({ "archives": archives, "job": job, "source": maps.source }))
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -199,18 +222,38 @@ struct Region {
 
 async fn download(State(maps): State<Maps>, Json(region): Json<Region>) -> Response {
     let [w, s, e, n] = region.bbox;
-    let sane = valid_name(&region.name) && w < e && s < n && w >= -180.0 && e <= 180.0 && s >= -90.0 && n <= 90.0 && region.maxzoom <= 15;
+    let sane = valid_name(&region.name)
+        && w < e
+        && s < n
+        && w >= -180.0
+        && e <= 180.0
+        && s >= -90.0
+        && n <= 90.0
+        && region.maxzoom <= 15;
     if !sane {
         return (StatusCode::BAD_REQUEST, "invalid name, bounds or zoom").into_response();
     }
     // The operator's own setting is trusted as is: pmtiles also reads http:// and local files.
-    let Some(source) = maps.source.clone().or(region.source.filter(|s| protomaps_build(s))) else {
-        return (StatusCode::BAD_REQUEST, "source must be a build.protomaps.com archive").into_response();
+    let Some(source) = maps
+        .source
+        .clone()
+        .or(region.source.filter(|s| protomaps_build(s)))
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "source must be a build.protomaps.com archive",
+        )
+            .into_response();
     };
     if tiles(region.bbox, region.maxzoom) > MAX_TILES {
-        return (StatusCode::BAD_REQUEST, "region too large at this detail: zoom in or pick less detail").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "region too large at this detail: zoom in or pick less detail",
+        )
+            .into_response();
     }
-    let Some(budget) = free_bytes(&maps.dir).and_then(|free| free.checked_sub(RESERVE_BYTES)) else {
+    let Some(budget) = free_bytes(&maps.dir).and_then(|free| free.checked_sub(RESERVE_BYTES))
+    else {
         return (StatusCode::INSUFFICIENT_STORAGE, "less than 2 GB free").into_response();
     };
     let cancel = Arc::new(Notify::new());
@@ -219,7 +262,11 @@ async fn download(State(maps): State<Maps>, Json(region): Json<Region>) -> Respo
         if job.as_ref().is_some_and(|j| j.error.is_none()) {
             return (StatusCode::CONFLICT, "a download is already running").into_response();
         }
-        *job = Some(Job { name: region.name.clone(), error: None, cancel: cancel.clone() });
+        *job = Some(Job {
+            name: region.name.clone(),
+            error: None,
+            cancel: cancel.clone(),
+        });
     }
 
     tokio::spawn(async move {
@@ -269,7 +316,11 @@ async fn download(State(maps): State<Maps>, Json(region): Json<Region>) -> Respo
         }
         // A cancelled download leaves nothing behind, not even an error.
         let error = error.filter(|e| e != CANCELLED);
-        *maps.job.lock().unwrap() = error.map(|error| Job { name: region.name, error: Some(error), cancel });
+        *maps.job.lock().unwrap() = error.map(|error| Job {
+            name: region.name,
+            error: Some(error),
+            cancel,
+        });
     });
     StatusCode::ACCEPTED.into_response()
 }
@@ -310,7 +361,9 @@ mod tests {
 
     #[test]
     fn only_protomaps_builds_from_clients() {
-        assert!(protomaps_build("https://build.protomaps.com/20260922.pmtiles"));
+        assert!(protomaps_build(
+            "https://build.protomaps.com/20260922.pmtiles"
+        ));
         for url in [
             "https://192.168.1.1/admin",
             "https://build.protomaps.com.evil.example/20260922.pmtiles",

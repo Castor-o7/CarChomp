@@ -19,9 +19,12 @@ const KISS_SILENCE: Duration = Duration::from_secs(15 * 60);
 
 /// Read with a deadline; silence past it ends the session like an error.
 async fn within<T>(limit: Duration, read: impl Future<Output = io::Result<T>>) -> io::Result<T> {
-    tokio::time::timeout(limit, read)
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, format!("nothing heard for {} s", limit.as_secs())))?
+    tokio::time::timeout(limit, read).await.map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("nothing heard for {} s", limit.as_secs()),
+        )
+    })?
 }
 
 pub async fn gpsd(addr: String, source: i16, bus: Bus) {
@@ -87,8 +90,18 @@ mod tests {
 
     #[tokio::test]
     async fn silence_is_an_error() {
-        let err = within(Duration::from_millis(10), std::future::pending::<io::Result<()>>()).await.unwrap_err();
+        let err = within(
+            Duration::from_millis(10),
+            std::future::pending::<io::Result<()>>(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        assert_eq!(within(Duration::from_secs(1), async { Ok(7) }).await.unwrap(), 7);
+        assert_eq!(
+            within(Duration::from_secs(1), async { Ok(7) })
+                .await
+                .unwrap(),
+            7
+        );
     }
 }

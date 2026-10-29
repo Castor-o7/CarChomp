@@ -8,8 +8,23 @@ pub fn snapshot(data_dir: &Path) -> Value {
     let read = |path: &str| fs::read_to_string(path).ok();
     let first_number = |path: &str| read(path)?.split_whitespace().next()?.parse::<f64>().ok();
     let meminfo = read("/proc/meminfo").unwrap_or_default();
-    let mem_kb = |key: &str| meminfo.lines().find_map(|l| l.strip_prefix(key)?.split_whitespace().next()?.parse::<u64>().ok());
-    let os = read("/etc/os-release").and_then(|s| Some(s.lines().find_map(|l| l.strip_prefix("PRETTY_NAME="))?.trim_matches('"').to_owned()));
+    let mem_kb = |key: &str| {
+        meminfo.lines().find_map(|l| {
+            l.strip_prefix(key)?
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
+    };
+    let os = read("/etc/os-release").and_then(|s| {
+        Some(
+            s.lines()
+                .find_map(|l| l.strip_prefix("PRETTY_NAME="))?
+                .trim_matches('"')
+                .to_owned(),
+        )
+    });
     let disk = rustix::fs::statvfs(data_dir).ok();
 
     json!({

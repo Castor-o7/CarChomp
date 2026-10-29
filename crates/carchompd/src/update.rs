@@ -24,7 +24,10 @@ pub fn router() -> Router {
     // One upload at a time: both would write the same file.
     let uploading = Arc::new(Semaphore::new(1));
     Router::new()
-        .route("/api/system/update", get(status).post(move |body| upload(uploading, body)))
+        .route(
+            "/api/system/update",
+            get(status).post(move |body| upload(uploading, body)),
+        )
         .route_layer(middleware::from_fn(crate::api::same_origin))
 }
 
@@ -42,12 +45,18 @@ async fn status() -> Response {
 /// is "activating" while its ExecStart runs and "deactivating" during
 /// ExecStopPost, so `is-active --quiet` (true only for active) would miss it.
 async fn running() -> bool {
-    let out = Command::new("systemctl").args(["show", "-p", "ActiveState", "--value", UNIT]).output().await;
+    let out = Command::new("systemctl")
+        .args(["show", "-p", "ActiveState", "--value", UNIT])
+        .output()
+        .await;
     out.is_ok_and(|o| o.status.success() && busy(&String::from_utf8_lossy(&o.stdout)))
 }
 
 fn busy(active_state: &str) -> bool {
-    matches!(active_state.trim(), "activating" | "active" | "reloading" | "deactivating")
+    matches!(
+        active_state.trim(),
+        "activating" | "active" | "reloading" | "deactivating"
+    )
 }
 
 async fn upload(uploading: Arc<Semaphore>, body: Body) -> Response {
@@ -68,15 +77,26 @@ async fn upload(uploading: Arc<Semaphore>, body: Body) -> Response {
         Err(Upload::Client(status, why)) => return (status, why).into_response(),
         Err(Upload::Io(e)) => {
             tracing::error!("update: saving the upload: {e}");
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("could not save the upload: {e}")).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not save the upload: {e}"),
+            )
+                .into_response();
         }
     }
     if let Err(e) = tokio::fs::rename(&part, &bundle).await {
         tracing::error!("update: {e}");
         let _ = tokio::fs::remove_file(&part).await;
-        return (StatusCode::INTERNAL_SERVER_ERROR, format!("could not save the upload: {e}")).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("could not save the upload: {e}"),
+        )
+            .into_response();
     }
-    let started = Command::new("systemctl").args(["start", "--no-block", UNIT]).output().await;
+    let started = Command::new("systemctl")
+        .args(["start", "--no-block", UNIT])
+        .output()
+        .await;
     match started {
         Ok(out) if out.status.success() => {
             tracing::info!("update: bundle received, {UNIT} started");
@@ -89,7 +109,11 @@ async fn upload(uploading: Arc<Semaphore>, body: Body) -> Response {
             };
             tracing::error!("update: starting {UNIT}: {why}");
             let _ = tokio::fs::remove_file(&bundle).await;
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("could not start the updater: {why}")).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("could not start the updater: {why}"),
+            )
+                .into_response()
         }
     }
 }
@@ -114,22 +138,40 @@ async fn receive(mut body: Body, dir: &Path, part: &Path) -> Result<(), Upload> 
     loop {
         let frame = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx));
         let frame = match tokio::time::timeout(READ_TIMEOUT, frame).await {
-            Err(_) => return Err(Upload::Client(StatusCode::REQUEST_TIMEOUT, "upload stalled")),
+            Err(_) => {
+                return Err(Upload::Client(
+                    StatusCode::REQUEST_TIMEOUT,
+                    "upload stalled",
+                ));
+            }
             Ok(None) => break,
-            Ok(Some(Err(_))) => return Err(Upload::Client(StatusCode::BAD_REQUEST, "upload interrupted")),
+            Ok(Some(Err(_))) => {
+                return Err(Upload::Client(
+                    StatusCode::BAD_REQUEST,
+                    "upload interrupted",
+                ));
+            }
             Ok(Some(Ok(frame))) => frame,
         };
-        let Ok(data) = frame.into_data() else { continue }; // trailers
+        let Ok(data) = frame.into_data() else {
+            continue;
+        }; // trailers
         if first && !data.is_empty() {
             // Every gzip file starts 1f 8b; anything else is the wrong file.
             if !data.starts_with(&[0x1f, 0x8b][..data.len().min(2)]) {
-                return Err(Upload::Client(StatusCode::BAD_REQUEST, "not a gzip file: upload a carchomp-*.tar.gz release bundle"));
+                return Err(Upload::Client(
+                    StatusCode::BAD_REQUEST,
+                    "not a gzip file: upload a carchomp-*.tar.gz release bundle",
+                ));
             }
             first = false;
         }
         size += data.len() as u64;
         if size > LIMIT {
-            return Err(Upload::Client(StatusCode::PAYLOAD_TOO_LARGE, "a release bundle is at most 300 MB"));
+            return Err(Upload::Client(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "a release bundle is at most 300 MB",
+            ));
         }
         file.write_all(&data).await?;
     }
