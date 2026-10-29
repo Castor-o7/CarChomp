@@ -87,14 +87,19 @@ impl Default for Config {
 
 fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<SocketAddr>, D::Error> {
     #[derive(Deserialize)]
-    #[serde(untagged, expecting = "an address such as \"127.0.0.1:80\" or a list of them")]
+    #[serde(
+        untagged,
+        expecting = "an address such as \"127.0.0.1:80\" or a list of them"
+    )]
     enum Listen {
         One(SocketAddr),
         Many(Vec<SocketAddr>),
     }
     match Listen::deserialize(d)? {
         Listen::One(addr) => Ok(vec![addr]),
-        Listen::Many(list) if list.is_empty() => Err(serde::de::Error::custom("listen: no addresses")),
+        Listen::Many(list) if list.is_empty() => {
+            Err(serde::de::Error::custom("listen: no addresses"))
+        }
         Listen::Many(list) => Ok(list),
     }
 }
@@ -105,7 +110,9 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<SocketAddr>
 fn to_bind(listen: &[SocketAddr]) -> Vec<SocketAddr> {
     let covered = |a: &SocketAddr| {
         !a.ip().is_unspecified()
-            && listen.iter().any(|w| w.ip().is_unspecified() && w.port() == a.port() && w.is_ipv4() == a.is_ipv4())
+            && listen.iter().any(|w| {
+                w.ip().is_unspecified() && w.port() == a.port() && w.is_ipv4() == a.is_ipv4()
+            })
     };
     listen.iter().filter(|a| !covered(a)).copied().collect()
 }
@@ -119,7 +126,12 @@ fn not_assigned(e: &io::Error) -> bool {
 
 /// Serve `app` on `addr` until `stop` changes. Without a listener, the address
 /// was not assigned at startup: wait for it in the background.
-async fn serve(addr: SocketAddr, listener: Option<TcpListener>, app: axum::Router, mut stop: watch::Receiver<()>) {
+async fn serve(
+    addr: SocketAddr,
+    listener: Option<TcpListener>,
+    app: axum::Router,
+    mut stop: watch::Receiver<()>,
+) {
     let listener = match listener {
         Some(listener) => listener,
         None => {
@@ -138,11 +150,14 @@ async fn serve(addr: SocketAddr, listener: Option<TcpListener>, app: axum::Route
         }
     };
     tracing::info!("listening on {addr}");
-    let served = axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(async move {
-            stop.changed().await.ok();
-        })
-        .await;
+    let served = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        stop.changed().await.ok();
+    })
+    .await;
     if let Err(e) = served {
         tracing::error!("serving {addr}: {e}");
     }
@@ -188,7 +203,12 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!().run(&recording).await?;
     let db = PgPoolOptions::new()
         .max_connections(4)
-        .connect_with(config.database_url.parse::<PgConnectOptions>()?.options([("statement_timeout", "10s")]))
+        .connect_with(
+            config
+                .database_url
+                .parse::<PgConnectOptions>()?
+                .options([("statement_timeout", "10s")]),
+        )
         .await?;
 
     let (bus, _) = broadcast::channel(256);
@@ -202,7 +222,12 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(sources::aprs_kiss(addr, source, bus.clone()));
     }
     let (status, _) = watch::channel(Status::default());
-    tokio::spawn(recorder::run(recording, bus.clone(), status.clone(), &config));
+    tokio::spawn(recorder::run(
+        recording,
+        bus.clone(),
+        status.clone(),
+        &config,
+    ));
 
     let mut listeners = Vec::new();
     for addr in to_bind(&config.listen) {
@@ -216,7 +241,10 @@ async fn main() -> anyhow::Result<()> {
         .merge(maps::router(config.maps_dir, config.map_source))
         .merge(wifi::router())
         .merge(update::router())
-        .layer(axum::middleware::from_fn_with_state(Arc::new(networks), api::trusted_peer));
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(networks),
+            api::trusted_peer,
+        ));
     let (stop, _) = watch::channel(());
     let mut servers = tokio::task::JoinSet::new();
     for (addr, listener) in listeners {
@@ -243,20 +271,37 @@ mod tests {
     #[test]
     fn listen_is_one_address_or_a_list() {
         assert_eq!(listen("").unwrap(), addrs(&["0.0.0.0:8000"]));
-        assert_eq!(listen(r#"listen = "0.0.0.0:80""#).unwrap(), addrs(&["0.0.0.0:80"]));
+        assert_eq!(
+            listen(r#"listen = "0.0.0.0:80""#).unwrap(),
+            addrs(&["0.0.0.0:80"])
+        );
         assert_eq!(
             listen(r#"listen = ["127.0.0.1:80", "10.42.0.1:80", "[::1]:80"]"#).unwrap(),
             addrs(&["127.0.0.1:80", "10.42.0.1:80", "[::1]:80"])
         );
-        for bad in [r#"listen = "localhost:80""#, r#"listen = ["127.0.0.1:80", "nope"]"#, "listen = []", "listen = 80"] {
+        for bad in [
+            r#"listen = "localhost:80""#,
+            r#"listen = ["127.0.0.1:80", "nope"]"#,
+            "listen = []",
+            "listen = 80",
+        ] {
             assert!(listen(bad).is_err(), "{bad}");
         }
     }
 
     #[test]
     fn a_wildcard_takes_its_port_for_its_family() {
-        let list = addrs(&["127.0.0.1:80", "10.42.0.1:80", "0.0.0.0:80", "10.42.0.1:8080", "[::1]:80"]);
-        assert_eq!(to_bind(&list), addrs(&["0.0.0.0:80", "10.42.0.1:8080", "[::1]:80"]));
+        let list = addrs(&[
+            "127.0.0.1:80",
+            "10.42.0.1:80",
+            "0.0.0.0:80",
+            "10.42.0.1:8080",
+            "[::1]:80",
+        ]);
+        assert_eq!(
+            to_bind(&list),
+            addrs(&["0.0.0.0:80", "10.42.0.1:8080", "[::1]:80"])
+        );
         let list = addrs(&["127.0.0.1:80", "10.42.0.1:80"]);
         assert_eq!(to_bind(&list), list);
     }

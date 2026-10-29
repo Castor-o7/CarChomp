@@ -18,15 +18,21 @@ use tokio::{
 pub async fn source_id(db: &PgPool, kind: &str, name: &str) -> sqlx::Result<i16> {
     // Look before inserting: an INSERT takes an id from the (smallint)
     // sequence even when it then conflicts, and this runs on every boot.
-    let find = || sqlx::query_scalar("SELECT id FROM source WHERE kind = $1 AND name = $2").bind(kind).bind(name);
+    let find = || {
+        sqlx::query_scalar("SELECT id FROM source WHERE kind = $1 AND name = $2")
+            .bind(kind)
+            .bind(name)
+    };
     if let Some(id) = find().fetch_optional(db).await? {
         return Ok(id);
     }
-    let id = sqlx::query_scalar("INSERT INTO source (kind, name) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING id")
-        .bind(kind)
-        .bind(name)
-        .fetch_optional(db)
-        .await?;
+    let id = sqlx::query_scalar(
+        "INSERT INTO source (kind, name) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING id",
+    )
+    .bind(kind)
+    .bind(name)
+    .fetch_optional(db)
+    .await?;
     match id {
         Some(id) => Ok(id),
         None => find().fetch_one(db).await, // inserted by someone else meanwhile
@@ -74,7 +80,12 @@ fn road_check_due(last: Option<OffsetDateTime>, now: OffsetDateTime) -> bool {
     last.is_none_or(|t| (now - t).as_seconds_f64().abs() >= ROAD_CHECK)
 }
 
-pub fn run(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Config) -> impl Future<Output = ()> + use<> {
+pub fn run(
+    db: PgPool,
+    bus: Bus,
+    status: watch::Sender<Status>,
+    config: &Config,
+) -> impl Future<Output = ()> + use<> {
     let mut rec = Recorder {
         db,
         bus,
@@ -171,7 +182,10 @@ impl Recorder {
 
     async fn aprs(&mut self, source: i16, p: &aprs::Packet) -> sqlx::Result<()> {
         let pos = p.position.as_ref();
-        let weather = p.weather.as_ref().map(|w| serde_json::to_string(w).expect("weather serializes"));
+        let weather = p
+            .weather
+            .as_ref()
+            .map(|w| serde_json::to_string(w).expect("weather serializes"));
         sqlx::query(
             "INSERT INTO aprs_packet (source_id, callsign, direct, kind, name, alive, geom,
                                       symbol, speed, course, weather, addressee, text, raw)
@@ -214,7 +228,12 @@ impl Recorder {
             .await?;
         tracing::info!("track {id} started");
         self.beacon.reset();
-        self.set(|s| *s = Status { track: Some(id), road_new: None });
+        self.set(|s| {
+            *s = Status {
+                track: Some(id),
+                road_new: None,
+            }
+        });
         Ok(id)
     }
 
@@ -252,7 +271,12 @@ impl Recorder {
 }
 
 pub async fn insert_fixes(db: &PgPool, source: i16, track: i64, fixes: &[Fix]) -> sqlx::Result<()> {
-    let column = |f: fn(&Fix) -> Option<f64>| fixes.iter().map(|x| f(x).map(|v| v as f32)).collect::<Vec<_>>();
+    let column = |f: fn(&Fix) -> Option<f64>| {
+        fixes
+            .iter()
+            .map(|x| f(x).map(|v| v as f32))
+            .collect::<Vec<_>>()
+    };
     sqlx::query(
         "INSERT INTO fix (time, source_id, track_id, geom, alt, speed, course, h_err)
          SELECT time, $1, $2, ST_SetSRID(ST_MakePoint(lon, lat), 4326), alt, speed, course, h_err
@@ -281,7 +305,10 @@ const MIN_TRACK: f64 = 50.0;
 /// segments are rebuilt from the fixes. Also used by import.
 pub async fn finish_track(db: &PgPool, id: i64) -> sqlx::Result<()> {
     let mut tx = db.begin().await?;
-    sqlx::query("DELETE FROM track_segment WHERE track_id = $1").bind(id).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM track_segment WHERE track_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(
         "INSERT INTO track_segment (track_id, geom)
          SELECT $1, ST_Subdivide(line, 32)::geography

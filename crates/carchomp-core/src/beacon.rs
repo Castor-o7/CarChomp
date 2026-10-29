@@ -61,7 +61,10 @@ enum Decision {
 
 impl SmartBeacon {
     pub fn new(params: Params) -> Self {
-        Self { params, ..Self::default() }
+        Self {
+            params,
+            ..Self::default()
+        }
     }
 
     /// Forget everything, so the next fix is kept unconditionally.
@@ -121,9 +124,15 @@ impl SmartBeacon {
                 }
             }
             // max/min rather than clamp: clamp panics if the config has them reversed.
-            (p.fast_rate * p.high_speed / speed).max(p.fast_rate).min(p.slow_rate)
+            (p.fast_rate * p.high_speed / speed)
+                .max(p.fast_rate)
+                .min(p.slow_rate)
         };
-        if elapsed >= rate { Decision::Keep } else { Decision::Skip }
+        if elapsed >= rate {
+            Decision::Keep
+        } else {
+            Decision::Skip
+        }
     }
 }
 
@@ -186,13 +195,31 @@ mod tests {
         let kept = run((0..=60).map(|t| fix(t, if t < 10 { 30.0 } else { 0.3 }, 90.0)));
         assert_eq!(kept, [0, 10]);
         // Stop-and-go: only the first stop after a kept moving fix is pegged.
-        let kept = run((0..=60).map(|t| fix(t, if t < 20 { 13.0 } else if t % 2 == 0 { 0.3 } else { 2.1 }, 90.0)));
+        let kept = run((0..=60).map(|t| {
+            fix(
+                t,
+                if t < 20 {
+                    13.0
+                } else if t % 2 == 0 {
+                    0.3
+                } else {
+                    2.1
+                },
+                90.0,
+            )
+        }));
         assert_eq!(kept, [0, 20]);
     }
 
     #[test]
     fn clock_stepping_back_starts_over() {
-        let kept = run([fix(100, 30.0, 90.0), fix(50, 30.0, 90.0), fix(51, 30.0, 90.0), fix(65, 30.0, 90.0)].into_iter());
+        let kept = run([
+            fix(100, 30.0, 90.0),
+            fix(50, 30.0, 90.0),
+            fix(51, 30.0, 90.0),
+            fix(65, 30.0, 90.0),
+        ]
+        .into_iter());
         assert_eq!(kept, [100, 50, 65]);
     }
 
@@ -223,13 +250,22 @@ mod tests {
     #[test]
     fn misspelt_param_is_rejected() {
         assert!(serde_json::from_str::<Params>(r#"{"fastrate": 5}"#).is_err());
-        assert_eq!(serde_json::from_str::<Params>(r#"{"fast_rate": 5}"#).unwrap().fast_rate, 5.0);
+        assert_eq!(
+            serde_json::from_str::<Params>(r#"{"fast_rate": 5}"#)
+                .unwrap()
+                .fast_rate,
+            5.0
+        );
     }
 
     #[test]
     fn reversed_or_nan_rates_do_not_panic() {
         for (fast, slow) in [(60.0, 30.0), (f64::NAN, 120.0), (15.0, f64::NAN)] {
-            let mut sb = SmartBeacon::new(Params { fast_rate: fast, slow_rate: slow, ..Params::default() });
+            let mut sb = SmartBeacon::new(Params {
+                fast_rate: fast,
+                slow_rate: slow,
+                ..Params::default()
+            });
             for t in 0..=200 {
                 sb.push(&fix(t, 30.0, 90.0));
             }

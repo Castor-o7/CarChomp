@@ -16,8 +16,9 @@ use axum::{
     routing::{any, get, post},
 };
 use carchomp_core::{
-    Fix, interchange,
+    Fix,
     beacon::{Params, SmartBeacon},
+    interchange,
 };
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -63,7 +64,10 @@ pub fn router(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Conf
         .route("/api/tracks", get(list_tracks))
         .route("/api/tracks/import", post(import_tracks))
         .route("/api/tracks/export.gpx", get(export_tracks))
-        .route("/api/tracks/{id}", get(get_track).patch(patch_track).delete(delete_track))
+        .route(
+            "/api/tracks/{id}",
+            get(get_track).patch(patch_track).delete(delete_track),
+        )
         .route("/api/tracks/{id}/gpx", get(get_track_gpx))
         .route("/api/segments", get(segments))
         .route("/api/aprs/stations", get(aprs_stations))
@@ -119,9 +123,15 @@ impl IntoResponse for Error {
 /// page. Browsers apply no CORS to WebSockets or to simple POSTs, so this is
 /// the only thing between any page a passenger opens and the car's position.
 pub async fn same_origin(req: Request, next: Next) -> Response {
-    let host = req.headers().get(header::HOST).and_then(|v| v.to_str().ok());
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok());
     let host = host.or(req.uri().authority().map(|a| a.as_str()));
-    let origin = req.headers().get(header::ORIGIN).map(|v| v.to_str().unwrap_or("null"));
+    let origin = req
+        .headers()
+        .get(header::ORIGIN)
+        .map(|v| v.to_str().unwrap_or("null"));
     if trusted(host, origin) {
         next.run(req).await
     } else {
@@ -140,7 +150,9 @@ fn trusted(host: Option<&str>, origin: Option<&str>) -> bool {
     let name = name.trim_end_matches('.').to_ascii_lowercase();
     let local = name.parse::<std::net::IpAddr>().is_ok()
         || (!name.is_empty() && !name.contains('.'))
-        || [".local", ".localhost", ".lan", ".home.arpa", ".internal"].iter().any(|s| name.ends_with(s));
+        || [".local", ".localhost", ".lan", ".home.arpa", ".internal"]
+            .iter()
+            .any(|s| name.ends_with(s));
     let same = match origin {
         None => true,
         Some(origin) => origin
@@ -161,7 +173,10 @@ pub struct Net {
 impl Net {
     fn parse(s: &str) -> Option<Net> {
         let (addr, prefix) = match s.trim().split_once('/') {
-            Some((addr, prefix)) => (addr.parse::<IpAddr>().ok()?, Some(prefix.parse::<u8>().ok()?)),
+            Some((addr, prefix)) => (
+                addr.parse::<IpAddr>().ok()?,
+                Some(prefix.parse::<u8>().ok()?),
+            ),
             None => (s.trim().parse::<IpAddr>().ok()?, None),
         };
         let max = if addr.is_ipv4() { 32 } else { 128 };
@@ -171,16 +186,27 @@ impl Net {
         }
         // Peers are compared unmapped, so ::ffff:a.b.c.d/n is a.b.c.d/(n - 96).
         match addr.to_canonical() {
-            IpAddr::V4(v4) if addr.is_ipv6() => Some(Net { addr: v4.into(), prefix: prefix.checked_sub(96)? }),
+            IpAddr::V4(v4) if addr.is_ipv6() => Some(Net {
+                addr: v4.into(),
+                prefix: prefix.checked_sub(96)?,
+            }),
             addr => Some(Net { addr, prefix }),
         }
     }
 
     fn contains(&self, ip: IpAddr) -> bool {
         // Keep the top `prefix` bits of a `bits`-wide address.
-        let top = |bits: u32, x: u128| if self.prefix == 0 { 0 } else { x >> (bits - u32::from(self.prefix)) };
+        let top = |bits: u32, x: u128| {
+            if self.prefix == 0 {
+                0
+            } else {
+                x >> (bits - u32::from(self.prefix))
+            }
+        };
         match (self.addr, ip.to_canonical()) {
-            (IpAddr::V4(net), IpAddr::V4(ip)) => top(32, u32::from(net).into()) == top(32, u32::from(ip).into()),
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                top(32, u32::from(net).into()) == top(32, u32::from(ip).into())
+            }
             (IpAddr::V6(net), IpAddr::V6(ip)) => top(128, net.into()) == top(128, ip.into()),
             _ => false,
         }
@@ -190,7 +216,10 @@ impl Net {
 /// Parse `trusted_networks`, naming the first entry that is not a network.
 pub fn networks(list: &[String]) -> Result<Vec<Net>, String> {
     list.iter()
-        .map(|s| Net::parse(s).ok_or_else(|| format!("trusted_networks: {s:?} is not an address or CIDR network")))
+        .map(|s| {
+            Net::parse(s)
+                .ok_or_else(|| format!("trusted_networks: {s:?} is not an address or CIDR network"))
+        })
         .collect()
 }
 
@@ -219,7 +248,10 @@ pub async fn trusted_peer(
 }
 
 /// Run a query that returns a single JSON text value and pass it through.
-async fn json(query: sqlx::query::QueryScalar<'_, sqlx::Postgres, String, sqlx::postgres::PgArguments>, db: &PgPool) -> Result<Response, Error> {
+async fn json(
+    query: sqlx::query::QueryScalar<'_, sqlx::Postgres, String, sqlx::postgres::PgArguments>,
+    db: &PgPool,
+) -> Result<Response, Error> {
     let body = query.fetch_one(db).await?;
     Ok(([(header::CONTENT_TYPE, "application/json")], body).into_response())
 }
@@ -279,7 +311,8 @@ async fn health(State(app): State<App>) -> Result<Response, Error> {
     )
     .bind(VERSION);
     let body: String = q.fetch_one(&app.db).await?;
-    let mut health: serde_json::Value = serde_json::from_str(&body).expect("PostgreSQL writes valid JSON");
+    let mut health: serde_json::Value =
+        serde_json::from_str(&body).expect("PostgreSQL writes valid JSON");
     health["system"] = system::snapshot(&app.data_dir);
     Ok(Json(health).into_response())
 }
@@ -298,7 +331,9 @@ struct Near {
 
 async fn list_tracks(State(app): State<App>, Query(q): Query<Near>) -> Result<Response, Error> {
     let (lon, lat, r) = match q.near.as_deref().map(floats) {
-        Some(Some([lon, lat, r])) if (-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat) && r >= 0.0 => {
+        Some(Some([lon, lat, r]))
+            if (-180.0..=180.0).contains(&lon) && (-90.0..=90.0).contains(&lat) && r >= 0.0 =>
+        {
             (Some(lon), Some(lat), Some(r.min(MAX_NEAR)))
         }
         Some(_) => return Ok(StatusCode::BAD_REQUEST.into_response()),
@@ -336,19 +371,31 @@ async fn get_track(State(app): State<App>, Path(id): Path<i64>) -> Result<Respon
 }
 
 async fn get_track_gpx(State(app): State<App>, Path(id): Path<i64>) -> Result<Response, Error> {
-    let name: Option<String> = sqlx::query_scalar("SELECT name FROM track WHERE id = $1").bind(id).fetch_one(&app.db).await?;
-    let rows: Vec<(OffsetDateTime, f64, f64, Option<f32>)> =
-        sqlx::query_as("SELECT time, ST_X(geom), ST_Y(geom), alt FROM fix WHERE track_id = $1 ORDER BY time")
-            .bind(id)
-            .fetch_all(&app.db)
-            .await?;
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM track WHERE id = $1")
+        .bind(id)
+        .fetch_one(&app.db)
+        .await?;
+    let rows: Vec<(OffsetDateTime, f64, f64, Option<f32>)> = sqlx::query_as(
+        "SELECT time, ST_X(geom), ST_Y(geom), alt FROM fix WHERE track_id = $1 ORDER BY time",
+    )
+    .bind(id)
+    .fetch_all(&app.db)
+    .await?;
     let points: Vec<_> = rows
         .into_iter()
-        .map(|(time, lon, lat, ele)| interchange::Point { lon, lat, ele: ele.map(f64::from), time: Some(time) })
+        .map(|(time, lon, lat, ele)| interchange::Point {
+            lon,
+            lat,
+            ele: ele.map(f64::from),
+            time: Some(time),
+        })
         .collect();
     let headers = [
         (header::CONTENT_TYPE, "application/gpx+xml".to_owned()),
-        (header::CONTENT_DISPOSITION, format!("attachment; filename=\"track-{id}.gpx\"")),
+        (
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"track-{id}.gpx\""),
+        ),
     ];
     Ok((headers, interchange::to_gpx(name.as_deref(), &points)).into_response())
 }
@@ -359,16 +406,29 @@ async fn import_tracks(State(app): State<App>, body: Body) -> Result<Response, E
     let Ok(_permit) = app.importing.try_acquire() else {
         return Ok((StatusCode::SERVICE_UNAVAILABLE, "another import is running").into_response());
     };
-    let body = match tokio::time::timeout(IMPORT_READ_TIMEOUT, axum::body::to_bytes(body, IMPORT_LIMIT)).await {
+    let body = match tokio::time::timeout(
+        IMPORT_READ_TIMEOUT,
+        axum::body::to_bytes(body, IMPORT_LIMIT),
+    )
+    .await
+    {
         Ok(Ok(body)) => body,
-        Ok(Err(_)) => return Ok((StatusCode::PAYLOAD_TOO_LARGE, "upload too large (16 MB at most) or interrupted").into_response()),
+        Ok(Err(_)) => {
+            return Ok((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "upload too large (16 MB at most) or interrupted",
+            )
+                .into_response());
+        }
         Err(_) => return Ok((StatusCode::REQUEST_TIMEOUT, "upload too slow").into_response()),
     };
     let Ok(body) = std::str::from_utf8(&body) else {
         return Ok((StatusCode::BAD_REQUEST, "not UTF-8 text").into_response());
     };
     let tracks = match interchange::parse(body) {
-        Ok(tracks) if tracks.is_empty() => return Ok((StatusCode::BAD_REQUEST, "no tracks found").into_response()),
+        Ok(tracks) if tracks.is_empty() => {
+            return Ok((StatusCode::BAD_REQUEST, "no tracks found").into_response());
+        }
         Ok(tracks) => tracks,
         Err(e) => return Ok((StatusCode::BAD_REQUEST, e).into_response()),
     };
@@ -383,7 +443,10 @@ async fn import_tracks(State(app): State<App>, body: Body) -> Result<Response, E
             let mut fixes: Vec<Fix> = (0..)
                 .zip(&track.points)
                 .map(|(i, p)| Fix {
-                    time: p.time.filter(|_| timed).unwrap_or(now + Duration::seconds(i)),
+                    time: p
+                        .time
+                        .filter(|_| timed)
+                        .unwrap_or(now + Duration::seconds(i)),
                     lat: p.lat,
                     lon: p.lon,
                     alt: p.ele,
@@ -398,11 +461,13 @@ async fn import_tracks(State(app): State<App>, body: Body) -> Result<Response, E
             if timed {
                 fixes = thin(fixes, app.beacon);
             }
-            let id: i64 = sqlx::query_scalar("INSERT INTO track (name, started) VALUES ($1, $2) RETURNING id")
-                .bind(&track.name)
-                .bind(fixes[0].time)
-                .fetch_one(&app.db)
-                .await?;
+            let id: i64 = sqlx::query_scalar(
+                "INSERT INTO track (name, started) VALUES ($1, $2) RETURNING id",
+            )
+            .bind(&track.name)
+            .bind(fixes[0].time)
+            .fetch_one(&app.db)
+            .await?;
             ids.push(id);
             recorder::insert_fixes(&app.db, source, id, &fixes).await?;
             recorder::finish_track(&app.db, id).await?;
@@ -412,7 +477,10 @@ async fn import_tracks(State(app): State<App>, body: Body) -> Result<Response, E
     .await;
     if let Err(e) = result {
         // Undo what was written; anything this misses is closed at the next start.
-        let _ = sqlx::query("DELETE FROM track WHERE id = ANY($1)").bind(&ids).execute(&app.db).await;
+        let _ = sqlx::query("DELETE FROM track WHERE id = ANY($1)")
+            .bind(&ids)
+            .execute(&app.db)
+            .await;
         return Err(e.into());
     }
     // finish_track drops tracks with nothing to draw.
@@ -433,7 +501,10 @@ fn distinct_times(fixes: &mut [Fix]) {
     let mut taken = HashSet::new();
     let mut next: HashMap<OffsetDateTime, OffsetDateTime> = HashMap::new();
     for fix in fixes {
-        let stamped = fix.time.replace_nanosecond(fix.time.nanosecond() / 1000 * 1000).expect("still in range");
+        let stamped = fix
+            .time
+            .replace_nanosecond(fix.time.nanosecond() / 1000 * 1000)
+            .expect("still in range");
         let mut time = next.get(&stamped).copied().unwrap_or(stamped);
         while !taken.insert(time) {
             time += Duration::microseconds(1);
@@ -453,28 +524,42 @@ fn thin(fixes: Vec<Fix>, params: Params) -> Vec<Fix> {
     let mut kept = HashSet::new();
     for (i, fix) in fixes.iter().enumerate() {
         let mut fed = fix.clone();
-        let pair = if i == 0 { fixes.get(..2) } else { fixes.get(i - 1..=i) };
+        let pair = if i == 0 {
+            fixes.get(..2)
+        } else {
+            fixes.get(i - 1..=i)
+        };
         if let Some([prev, fix]) = pair {
             let seconds = (fix.time - prev.time).as_seconds_f64();
-            fed.speed = fed.speed.or((seconds > 0.0).then(|| distance(prev, fix) / seconds));
+            fed.speed = fed
+                .speed
+                .or((seconds > 0.0).then(|| distance(prev, fix) / seconds));
             fed.course = fed.course.or(Some(bearing(prev, fix)));
         }
         kept.extend(beacon.push(&fed).into_iter().map(|f| f.time));
     }
     kept.extend(fixes.last().map(|f| f.time));
-    fixes.into_iter().filter(|f| kept.contains(&f.time)).collect()
+    fixes
+        .into_iter()
+        .filter(|f| kept.contains(&f.time))
+        .collect()
 }
 
 /// Great-circle distance in metres.
 fn distance(a: &Fix, b: &Fix) -> f64 {
     let (p1, p2) = (a.lat.to_radians(), b.lat.to_radians());
-    let h = ((p2 - p1) / 2.0).sin().powi(2) + p1.cos() * p2.cos() * ((b.lon - a.lon).to_radians() / 2.0).sin().powi(2);
+    let h = ((p2 - p1) / 2.0).sin().powi(2)
+        + p1.cos() * p2.cos() * ((b.lon - a.lon).to_radians() / 2.0).sin().powi(2);
     2.0 * 6_371_008.8 * h.sqrt().min(1.0).asin()
 }
 
 /// Initial bearing from `a` to `b`, degrees true, 0..360.
 fn bearing(a: &Fix, b: &Fix) -> f64 {
-    let (p1, p2, dl) = (a.lat.to_radians(), b.lat.to_radians(), (b.lon - a.lon).to_radians());
+    let (p1, p2, dl) = (
+        a.lat.to_radians(),
+        b.lat.to_radians(),
+        (b.lon - a.lon).to_radians(),
+    );
     let y = dl.sin() * p2.cos();
     let x = p1.cos() * p2.sin() - p1.sin() * p2.cos() * dl.cos();
     y.atan2(x).to_degrees().rem_euclid(360.0)
@@ -483,23 +568,34 @@ fn bearing(a: &Fix, b: &Fix) -> f64 {
 /// Every visible track, each its own <trk>, in one GPX file.
 async fn export_tracks(State(app): State<App>) -> Result<Response, Error> {
     let tracks: Vec<(i64, Option<String>)> =
-        sqlx::query_as("SELECT id, name FROM track WHERE visible ORDER BY started").fetch_all(&app.db).await?;
+        sqlx::query_as("SELECT id, name FROM track WHERE visible ORDER BY started")
+            .fetch_all(&app.db)
+            .await?;
     let mut all = Vec::new();
     for (id, name) in tracks {
-        let rows: Vec<(OffsetDateTime, f64, f64, Option<f32>)> =
-            sqlx::query_as("SELECT time, ST_X(geom), ST_Y(geom), alt FROM fix WHERE track_id = $1 ORDER BY time")
-                .bind(id)
-                .fetch_all(&app.db)
-                .await?;
+        let rows: Vec<(OffsetDateTime, f64, f64, Option<f32>)> = sqlx::query_as(
+            "SELECT time, ST_X(geom), ST_Y(geom), alt FROM fix WHERE track_id = $1 ORDER BY time",
+        )
+        .bind(id)
+        .fetch_all(&app.db)
+        .await?;
         let points = rows
             .into_iter()
-            .map(|(time, lon, lat, ele)| interchange::Point { lon, lat, ele: ele.map(f64::from), time: Some(time) })
+            .map(|(time, lon, lat, ele)| interchange::Point {
+                lon,
+                lat,
+                ele: ele.map(f64::from),
+                time: Some(time),
+            })
             .collect();
         all.push((name, points));
     }
     let headers = [
         (header::CONTENT_TYPE, "application/gpx+xml"),
-        (header::CONTENT_DISPOSITION, "attachment; filename=\"carchomp-tracks.gpx\""),
+        (
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"carchomp-tracks.gpx\"",
+        ),
     ];
     Ok((headers, gpx_all(&all)).into_response())
 }
@@ -507,11 +603,17 @@ async fn export_tracks(State(app): State<App>) -> Result<Response, Error> {
 /// One GPX document holding each track's <trk> as `to_gpx` writes it.
 fn gpx_all(tracks: &[(Option<String>, Vec<interchange::Point>)]) -> String {
     let one = interchange::to_gpx(None, &[]);
-    let (head, tail) = (&one[..one.find("<trk>").expect("to_gpx writes a trk")], "</gpx>\n");
+    let (head, tail) = (
+        &one[..one.find("<trk>").expect("to_gpx writes a trk")],
+        "</gpx>\n",
+    );
     let mut gpx = head.to_owned();
     for (name, points) in tracks {
         let doc = interchange::to_gpx(name.as_deref(), points);
-        let (start, end) = (doc.find("<trk>").expect("a trk"), doc.rfind("</trk>").expect("a trk") + "</trk>\n".len());
+        let (start, end) = (
+            doc.find("<trk>").expect("a trk"),
+            doc.rfind("</trk>").expect("a trk") + "</trk>\n".len(),
+        );
         gpx += &doc[start..end];
     }
     gpx + tail
@@ -548,7 +650,10 @@ async fn segments(State(app): State<App>, Query(q): Query<Viewport>) -> Result<R
 
 /// Parse exactly `N` comma-separated numbers.
 fn floats<const N: usize>(s: &str) -> Option<[f64; N]> {
-    let v: Vec<f64> = s.split(',').map(|x| x.trim().parse::<f64>().ok().filter(|v| v.is_finite())).collect::<Option<_>>()?;
+    let v: Vec<f64> = s
+        .split(',')
+        .map(|x| x.trim().parse::<f64>().ok().filter(|v| v.is_finite()))
+        .collect::<Option<_>>()?;
     v.try_into().ok()
 }
 
@@ -558,21 +663,33 @@ struct TrackPatch {
     visible: Option<bool>,
 }
 
-async fn patch_track(State(app): State<App>, Path(id): Path<i64>, Json(p): Json<TrackPatch>) -> Result<StatusCode, Error> {
-    let done = sqlx::query("UPDATE track SET name = coalesce($2, name), visible = coalesce($3, visible) WHERE id = $1")
-        .bind(id)
-        .bind(p.name)
-        .bind(p.visible)
-        .execute(&app.db)
-        .await?;
+async fn patch_track(
+    State(app): State<App>,
+    Path(id): Path<i64>,
+    Json(p): Json<TrackPatch>,
+) -> Result<StatusCode, Error> {
+    let done = sqlx::query(
+        "UPDATE track SET name = coalesce($2, name), visible = coalesce($3, visible) WHERE id = $1",
+    )
+    .bind(id)
+    .bind(p.name)
+    .bind(p.visible)
+    .execute(&app.db)
+    .await?;
     Ok(found(done.rows_affected()))
 }
 
 /// Only finished tracks: the recorder (or an import) is still writing an open one.
 async fn delete_track(State(app): State<App>, Path(id): Path<i64>) -> Result<StatusCode, Error> {
-    let done = sqlx::query("DELETE FROM track WHERE id = $1 AND ended IS NOT NULL").bind(id).execute(&app.db).await?;
+    let done = sqlx::query("DELETE FROM track WHERE id = $1 AND ended IS NOT NULL")
+        .bind(id)
+        .execute(&app.db)
+        .await?;
     if done.rows_affected() == 0 {
-        let open: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM track WHERE id = $1)").bind(id).fetch_one(&app.db).await?;
+        let open: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM track WHERE id = $1)")
+            .bind(id)
+            .fetch_one(&app.db)
+            .await?;
         if open {
             return Ok(StatusCode::CONFLICT);
         }
@@ -581,7 +698,11 @@ async fn delete_track(State(app): State<App>, Path(id): Path<i64>) -> Result<Sta
 }
 
 fn found(rows: u64) -> StatusCode {
-    if rows == 0 { StatusCode::NOT_FOUND } else { StatusCode::NO_CONTENT }
+    if rows == 0 {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::NO_CONTENT
+    }
 }
 
 #[derive(Deserialize)]
@@ -636,17 +757,38 @@ mod tests {
 
     #[test]
     fn only_local_hosts_and_their_own_pages() {
-        for host in ["localhost", "localhost:8000", "127.0.0.1", "192.168.4.1:80", "[::1]:8000", "carchomp", "carchomp.local", "pi.lan."] {
+        for host in [
+            "localhost",
+            "localhost:8000",
+            "127.0.0.1",
+            "192.168.4.1:80",
+            "[::1]:8000",
+            "carchomp",
+            "carchomp.local",
+            "pi.lan.",
+        ] {
             assert!(trusted(Some(host), None), "{host}");
         }
         for host in ["evil.example.com", "192.168.4.1.nip.io", "", ":80"] {
             assert!(!trusted(Some(host), None), "{host}");
         }
         assert!(!trusted(None, None));
-        assert!(trusted(Some("carchomp.local"), Some("http://carchomp.local")));
-        assert!(trusted(Some("localhost:5173"), Some("http://localhost:5173")));
-        assert!(!trusted(Some("192.168.4.1"), Some("https://evil.example.com")));
-        assert!(!trusted(Some("localhost:8000"), Some("http://localhost:5173")));
+        assert!(trusted(
+            Some("carchomp.local"),
+            Some("http://carchomp.local")
+        ));
+        assert!(trusted(
+            Some("localhost:5173"),
+            Some("http://localhost:5173")
+        ));
+        assert!(!trusted(
+            Some("192.168.4.1"),
+            Some("https://evil.example.com")
+        ));
+        assert!(!trusted(
+            Some("localhost:8000"),
+            Some("http://localhost:5173")
+        ));
         assert!(!trusted(Some("localhost"), Some("null")));
     }
 
@@ -656,15 +798,53 @@ mod tests {
 
     #[test]
     fn cidr_parsing() {
-        assert_eq!(Net::parse("10.42.0.0/24"), Some(Net { addr: ip("10.42.0.0"), prefix: 24 }));
-        assert_eq!(Net::parse(" 192.168.1.5 "), Some(Net { addr: ip("192.168.1.5"), prefix: 32 }));
-        assert_eq!(Net::parse("fd00::/8"), Some(Net { addr: ip("fd00::"), prefix: 8 }));
-        assert_eq!(Net::parse("::ffff:10.0.0.0/104"), Some(Net { addr: ip("10.0.0.0"), prefix: 8 }));
-        for bad in ["::ffff:10.0.0.0/64", "", "10.42.0.0/33", "fd00::/129", "10.42.0/24", "10.42.0.0/", "/24", "10.42.0.0/-1", "host.local/24"] {
+        assert_eq!(
+            Net::parse("10.42.0.0/24"),
+            Some(Net {
+                addr: ip("10.42.0.0"),
+                prefix: 24
+            })
+        );
+        assert_eq!(
+            Net::parse(" 192.168.1.5 "),
+            Some(Net {
+                addr: ip("192.168.1.5"),
+                prefix: 32
+            })
+        );
+        assert_eq!(
+            Net::parse("fd00::/8"),
+            Some(Net {
+                addr: ip("fd00::"),
+                prefix: 8
+            })
+        );
+        assert_eq!(
+            Net::parse("::ffff:10.0.0.0/104"),
+            Some(Net {
+                addr: ip("10.0.0.0"),
+                prefix: 8
+            })
+        );
+        for bad in [
+            "::ffff:10.0.0.0/64",
+            "",
+            "10.42.0.0/33",
+            "fd00::/129",
+            "10.42.0/24",
+            "10.42.0.0/",
+            "/24",
+            "10.42.0.0/-1",
+            "host.local/24",
+        ] {
             assert_eq!(Net::parse(bad), None, "{bad}");
         }
         assert!(networks(&["10.42.0.0/24".into(), "fd00::/8".into()]).is_ok());
-        assert!(networks(&["10.42.0.0/24".into(), "nope".into()]).unwrap_err().contains("\"nope\""));
+        assert!(
+            networks(&["10.42.0.0/24".into(), "nope".into()])
+                .unwrap_err()
+                .contains("\"nope\"")
+        );
     }
 
     #[test]
@@ -674,7 +854,10 @@ mod tests {
         assert!(hotspot.contains(ip("10.42.0.255")));
         assert!(!hotspot.contains(ip("10.42.1.1")));
         assert!(!hotspot.contains(ip("10.43.0.1")));
-        assert!(hotspot.contains(ip("::ffff:10.42.0.7")), "IPv4-mapped peers are unmapped");
+        assert!(
+            hotspot.contains(ip("::ffff:10.42.0.7")),
+            "IPv4-mapped peers are unmapped"
+        );
         assert!(!hotspot.contains(ip("fd00::1")));
         let odd = Net::parse("192.168.4.128/25").unwrap();
         assert!(odd.contains(ip("192.168.4.200")) && !odd.contains(ip("192.168.4.127")));
@@ -690,10 +873,22 @@ mod tests {
     #[test]
     fn loopback_is_always_allowed() {
         let hotspot = networks(&["10.42.0.0/24".into()]).unwrap();
-        for peer in ["127.0.0.1", "127.8.9.10", "::1", "::ffff:127.0.0.1", "10.42.0.23", "::ffff:10.42.0.23"] {
+        for peer in [
+            "127.0.0.1",
+            "127.8.9.10",
+            "::1",
+            "::ffff:127.0.0.1",
+            "10.42.0.23",
+            "::ffff:10.42.0.23",
+        ] {
             assert!(peer_allowed(&hotspot, ip(peer)), "{peer}");
         }
-        for peer in ["192.168.1.20", "10.42.1.2", "fe80::1", "::ffff:192.168.1.20"] {
+        for peer in [
+            "192.168.1.20",
+            "10.42.1.2",
+            "fe80::1",
+            "::ffff:192.168.1.20",
+        ] {
             assert!(!peer_allowed(&hotspot, ip(peer)), "{peer}");
         }
         assert!(peer_allowed(&[], ip("::1")) && !peer_allowed(&[], ip("10.42.0.2")));
@@ -717,18 +912,29 @@ mod tests {
             let app = Router::new()
                 .route("/api/health", get(|| async { "ok" }))
                 .fallback(|| async { "ui" })
-                .layer(middleware::from_fn_with_state(hotspot.clone(), trusted_peer))
+                .layer(middleware::from_fn_with_state(
+                    hotspot.clone(),
+                    trusted_peer,
+                ))
                 .layer(MockConnectInfo(peer.parse::<SocketAddr>().unwrap()));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             tokio::spawn(async move { axum::serve(listener, app).await });
             let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-            let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            let request =
+                format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
             stream.write_all(request.as_bytes()).await.unwrap();
             let mut response = String::new();
             stream.read_to_string(&mut response).await.unwrap();
-            assert!(response.starts_with(&format!("HTTP/1.1 {status} ")), "{peer} {path}: {response}");
-            assert_eq!(status == "403", response.contains("trusted_networks"), "{peer} {path}");
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status} ")),
+                "{peer} {path}: {response}"
+            );
+            assert_eq!(
+                status == "403",
+                response.contains("trusted_networks"),
+                "{peer} {path}"
+            );
         }
     }
 
@@ -754,17 +960,27 @@ mod tests {
     fn drive(n: i64, speed: f64) -> Vec<Fix> {
         let t = datetime!(2026-09-17 20:00 UTC);
         (0..n)
-            .map(|i| Fix { lon: i as f64 * speed / 111_195.0, ..fix(t + Duration::seconds(i)) })
+            .map(|i| Fix {
+                lon: i as f64 * speed / 111_195.0,
+                ..fix(t + Duration::seconds(i))
+            })
             .collect()
     }
 
     #[test]
     fn imports_are_thinned_like_live_drives() {
         // 30 m/s is above high_speed: one fix per fast_rate (15 s), plus the last.
-        let kept: Vec<_> = thin(drive(61, 30.0), Params::default()).iter().map(|f| f.time.second()).collect();
+        let kept: Vec<_> = thin(drive(61, 30.0), Params::default())
+            .iter()
+            .map(|f| f.time.second())
+            .collect();
         assert_eq!(kept, [0, 15, 30, 45, 0]);
         // What was kept is stored as it came: no derived speed or course.
-        assert!(thin(drive(5, 30.0), Params::default()).iter().all(|f| f.speed.is_none() && f.course.is_none()));
+        assert!(
+            thin(drive(5, 30.0), Params::default())
+                .iter()
+                .all(|f| f.speed.is_none() && f.course.is_none())
+        );
     }
 
     #[test]
@@ -778,7 +994,10 @@ mod tests {
             ..corner.clone()
         }));
         let kept = thin(fixes, Params::default());
-        assert!(kept.iter().any(|f| f.time == corner.time), "the fix at the bend is kept");
+        assert!(
+            kept.iter().any(|f| f.time == corner.time),
+            "the fix at the bend is kept"
+        );
         assert!(kept.len() < 10, "{} kept", kept.len());
     }
 
@@ -797,8 +1016,16 @@ mod tests {
     #[test]
     fn export_is_one_gpx_with_a_trk_per_track() {
         let t = datetime!(2026-09-17 20:00 UTC);
-        let p = |lon: f64| interchange::Point { lon, lat: 45.0, ele: None, time: Some(t) };
-        let tracks = vec![(Some("Coast".to_owned()), vec![p(1.0), p(2.0)]), (None, vec![p(3.0), p(4.0)])];
+        let p = |lon: f64| interchange::Point {
+            lon,
+            lat: 45.0,
+            ele: None,
+            time: Some(t),
+        };
+        let tracks = vec![
+            (Some("Coast".to_owned()), vec![p(1.0), p(2.0)]),
+            (None, vec![p(3.0), p(4.0)]),
+        ];
         let gpx = gpx_all(&tracks);
         assert_eq!(gpx.matches("<gpx ").count(), 1);
         assert_eq!(gpx.matches("<trk>").count(), 2);
@@ -810,17 +1037,31 @@ mod tests {
     }
 
     fn fix(time: OffsetDateTime) -> Fix {
-        Fix { time, lat: 0.0, lon: 0.0, alt: None, speed: None, course: None, h_err: None }
+        Fix {
+            time,
+            lat: 0.0,
+            lon: 0.0,
+            alt: None,
+            speed: None,
+            course: None,
+            h_err: None,
+        }
     }
 
     #[test]
     fn repeated_times_are_kept_apart_in_order() {
         let t = datetime!(2026-09-17 20:00:01 UTC);
         let us = Duration::microseconds(1);
-        let mut fixes: Vec<_> = [t, t, t, t + us, t + Duration::seconds(1)].into_iter().map(fix).collect();
+        let mut fixes: Vec<_> = [t, t, t, t + us, t + Duration::seconds(1)]
+            .into_iter()
+            .map(fix)
+            .collect();
         distinct_times(&mut fixes);
         let got: Vec<_> = fixes.iter().map(|f| f.time).collect();
-        assert_eq!(got, [t, t + us, t + 2 * us, t + 3 * us, t + Duration::seconds(1)]);
+        assert_eq!(
+            got,
+            [t, t + us, t + 2 * us, t + 3 * us, t + Duration::seconds(1)]
+        );
     }
 
     #[test]

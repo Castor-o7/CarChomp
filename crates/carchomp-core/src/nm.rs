@@ -36,7 +36,9 @@ pub fn fields(line: &str) -> Vec<String> {
 pub fn wifi_list(output: &str) -> Vec<Network> {
     let mut networks: Vec<Network> = Vec::new();
     for line in output.lines() {
-        let [active, ssid, signal, security] = &fields(line)[..] else { continue };
+        let [active, ssid, signal, security] = &fields(line)[..] else {
+            continue;
+        };
         let network = Network {
             ssid: ssid.clone(),
             signal: signal.parse().unwrap_or(0),
@@ -75,14 +77,23 @@ pub fn saved_wifi(output: &str) -> Vec<String> {
 /// (NetworkManager gives up after 4 failures by default, fatal in a moving
 /// car), and an enterprise network wins over others in range.
 pub fn autoconnect(enterprise: bool) -> [&'static str; 4] {
-    ["connection.autoconnect-retries", "0", "connection.autoconnect-priority", if enterprise { "10" } else { "0" }]
+    [
+        "connection.autoconnect-retries",
+        "0",
+        "connection.autoconnect-priority",
+        if enterprise { "10" } else { "0" },
+    ]
 }
 
 /// How an enterprise join checks that it talks to the real RADIUS server.
 pub enum Server<'a> {
     /// An `.eap-config` file, its CA bundle (and EAP-TLS client certificate)
     /// saved at these paths.
-    File { profile: &'a Profile, ca_cert: &'a str, client_cert: Option<&'a str> },
+    File {
+        profile: &'a Profile,
+        ca_cert: &'a str,
+        client_cert: Option<&'a str>,
+    },
     /// No file: PEAP/MSCHAPv2, a server certificate from the system CAs for
     /// this domain.
     Domain(&'a str),
@@ -90,7 +101,10 @@ pub enum Server<'a> {
 
 /// The realm of `user@realm`, if any.
 pub fn realm(identity: &str) -> Option<&str> {
-    identity.rsplit_once('@').map(|(_, realm)| realm).filter(|realm| !realm.is_empty())
+    identity
+        .rsplit_once('@')
+        .map(|(_, realm)| realm)
+        .filter(|realm| !realm.is_empty())
 }
 
 /// `nmcli connection add|modify` arguments (property, value, ...) for an
@@ -99,7 +113,11 @@ pub fn realm(identity: &str) -> Option<&str> {
 /// then asks for them and `--ask` answers from standard input.
 pub fn enterprise_settings(identity: &str, server: &Server) -> Vec<String> {
     let ((eap, phase2, phase2_eap), anonymous, ca_cert, domains, client_cert) = match server {
-        Server::File { profile, ca_cert, client_cert } => {
+        Server::File {
+            profile,
+            ca_cert,
+            client_cert,
+        } => {
             let method = match profile.method {
                 Method::Tls => ("tls", "", ""),
                 Method::Peap => ("peap", "mschapv2", ""),
@@ -108,11 +126,25 @@ pub fn enterprise_settings(identity: &str, server: &Server) -> Vec<String> {
                 Method::TtlsEapMschapv2 => ("ttls", "", "mschapv2"),
             };
             let anonymous = profile.anonymous_identity.clone().unwrap_or_default();
-            (method, anonymous, *ca_cert, profile.server_names.join(";"), client_cert.unwrap_or_default())
+            (
+                method,
+                anonymous,
+                *ca_cert,
+                profile.server_names.join(";"),
+                client_cert.unwrap_or_default(),
+            )
         }
         Server::Domain(domain) => {
-            let anonymous = realm(identity).map(|realm| format!("anonymous@{realm}")).unwrap_or_default();
-            (("peap", "mschapv2", ""), anonymous, "", domain.to_string(), "")
+            let anonymous = realm(identity)
+                .map(|realm| format!("anonymous@{realm}"))
+                .unwrap_or_default();
+            (
+                ("peap", "mschapv2", ""),
+                anonymous,
+                "",
+                domain.to_string(),
+                "",
+            )
         }
     };
     // The file's CA alone, or else the system's: never neither.
@@ -133,7 +165,12 @@ pub fn enterprise_settings(identity: &str, server: &Server) -> Vec<String> {
         ("802-1x.password", ""),
         ("802-1x.private-key-password", ""),
     ];
-    settings.iter().flat_map(|(k, v)| [k, *v]).chain(autoconnect(true)).map(str::to_string).collect()
+    settings
+        .iter()
+        .flat_map(|(k, v)| [k, *v])
+        .chain(autoconnect(true))
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -142,23 +179,40 @@ mod tests {
 
     #[test]
     fn unescapes_fields() {
-        assert_eq!(fields(r"yes:Caf\:e \\ bar:70:WPA2"), ["yes", r"Caf:e \ bar", "70", "WPA2"]);
+        assert_eq!(
+            fields(r"yes:Caf\:e \\ bar:70:WPA2"),
+            ["yes", r"Caf:e \ bar", "70", "WPA2"]
+        );
         assert_eq!(fields("a::b"), ["a", "", "b"]);
     }
 
     #[test]
     fn lists_each_network_once_strongest_first() {
-        let out = "no:home:40:WPA2\nyes:home:72:WPA2\nno::55:WPA2\nno:cafe:90:\nno:lab:80:--\ngarbage\n";
+        let out =
+            "no:home:40:WPA2\nyes:home:72:WPA2\nno::55:WPA2\nno:cafe:90:\nno:lab:80:--\ngarbage\n";
         let got = wifi_list(out);
-        let summary: Vec<_> = got.iter().map(|n| (n.ssid.as_str(), n.signal, n.secure, n.active)).collect();
-        assert_eq!(summary, [("home", 72, true, true), ("cafe", 90, false, false), ("lab", 80, false, false)]);
+        let summary: Vec<_> = got
+            .iter()
+            .map(|n| (n.ssid.as_str(), n.signal, n.secure, n.active))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("home", 72, true, true),
+                ("cafe", 90, false, false),
+                ("lab", 80, false, false)
+            ]
+        );
         assert!(got.iter().all(|n| !n.enterprise));
     }
 
     #[test]
     fn flags_enterprise_networks() {
         let got = wifi_list("no:eduroam:60:WPA2 802.1X\nno:home:50:WPA2\n");
-        let summary: Vec<_> = got.iter().map(|n| (n.ssid.as_str(), n.secure, n.enterprise)).collect();
+        let summary: Vec<_> = got
+            .iter()
+            .map(|n| (n.ssid.as_str(), n.secure, n.enterprise))
+            .collect();
         assert_eq!(summary, [("eduroam", true, true), ("home", true, false)]);
     }
 
@@ -169,7 +223,10 @@ mod tests {
     }
 
     fn setting<'a>(settings: &'a [String], key: &str) -> &'a str {
-        let i = settings.iter().position(|s| s == key).unwrap_or_else(|| panic!("no {key}"));
+        let i = settings
+            .iter()
+            .position(|s| s == key)
+            .unwrap_or_else(|| panic!("no {key}"));
         &settings[i + 1]
     }
 
@@ -222,14 +279,24 @@ mod tests {
     #[test]
     fn file_join_pins_its_ca_and_server_names() {
         let peap = file(Method::Peap);
-        let s = enterprise_settings("prof@example.edu", &Server::File { profile: &peap, ca_cert: "/d/ca.pem", client_cert: None });
+        let s = enterprise_settings(
+            "prof@example.edu",
+            &Server::File {
+                profile: &peap,
+                ca_cert: "/d/ca.pem",
+                client_cert: None,
+            },
+        );
         for (k, v) in [
             ("802-1x.eap", "peap"),
             ("802-1x.phase2-auth", "mschapv2"),
             ("802-1x.anonymous-identity", "anonymous@example.edu"),
             ("802-1x.ca-cert", "/d/ca.pem"),
             ("802-1x.system-ca-certs", "no"),
-            ("802-1x.domain-suffix-match", "radius.example.edu;radius2.example.edu"),
+            (
+                "802-1x.domain-suffix-match",
+                "radius.example.edu;radius2.example.edu",
+            ),
             ("802-1x.private-key", ""),
         ] {
             assert_eq!(setting(&s, k), v, "{k}");
@@ -240,12 +307,33 @@ mod tests {
             (Method::TtlsEapMschapv2, "ttls", "", "mschapv2"),
         ] {
             let p = file(method);
-            let s = enterprise_settings("u", &Server::File { profile: &p, ca_cert: "/d/ca.pem", client_cert: None });
-            let got = (setting(&s, "802-1x.eap"), setting(&s, "802-1x.phase2-auth"), setting(&s, "802-1x.phase2-autheap"));
+            let s = enterprise_settings(
+                "u",
+                &Server::File {
+                    profile: &p,
+                    ca_cert: "/d/ca.pem",
+                    client_cert: None,
+                },
+            );
+            let got = (
+                setting(&s, "802-1x.eap"),
+                setting(&s, "802-1x.phase2-auth"),
+                setting(&s, "802-1x.phase2-autheap"),
+            );
             assert_eq!(got, (eap, phase2, phase2_eap), "{method:?}");
         }
-        let tls = Profile { anonymous_identity: None, ..file(Method::Tls) };
-        let s = enterprise_settings("dev@example.edu", &Server::File { profile: &tls, ca_cert: "/d/ca.pem", client_cert: Some("/d/client.p12") });
+        let tls = Profile {
+            anonymous_identity: None,
+            ..file(Method::Tls)
+        };
+        let s = enterprise_settings(
+            "dev@example.edu",
+            &Server::File {
+                profile: &tls,
+                ca_cert: "/d/ca.pem",
+                client_cert: Some("/d/client.p12"),
+            },
+        );
         for (k, v) in [
             ("802-1x.eap", "tls"),
             ("802-1x.phase2-auth", ""),
@@ -260,6 +348,14 @@ mod tests {
 
     #[test]
     fn client_profiles_retry_forever() {
-        assert_eq!(autoconnect(false), ["connection.autoconnect-retries", "0", "connection.autoconnect-priority", "0"]);
+        assert_eq!(
+            autoconnect(false),
+            [
+                "connection.autoconnect-retries",
+                "0",
+                "connection.autoconnect-priority",
+                "0"
+            ]
+        );
     }
 }

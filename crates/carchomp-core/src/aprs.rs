@@ -162,7 +162,10 @@ pub fn parse_info(from: &str, to: &str, info: &[u8]) -> Packet {
     let mut packet = blank.clone();
     match fill(&mut packet, to, info) {
         Some(()) => packet,
-        None => Packet { text: text(info), ..blank },
+        None => Packet {
+            text: text(info),
+            ..blank
+        },
     }
 }
 
@@ -181,8 +184,17 @@ fn fill(p: &mut Packet, to: &str, info: &[u8]) -> Option<()> {
         }
         // )NAME!<position>   name is 3 to 9 characters
         b')' => {
-            let end = body.iter().take(10).position(|&b| b == b'!' || b == b'_').filter(|&n| n >= 3)?;
-            object(p, &body[..end], if body[end] == b'!' { b'*' } else { b'_' }, &body[end + 1..])
+            let end = body
+                .iter()
+                .take(10)
+                .position(|&b| b == b'!' || b == b'_')
+                .filter(|&n| n >= 3)?;
+            object(
+                p,
+                &body[..end],
+                if body[end] == b'!' { b'*' } else { b'_' },
+                &body[end + 1..],
+            )
         }
         // :ADDRESSEE:text{id
         b':' => {
@@ -191,7 +203,9 @@ fn fill(p: &mut Packet, to: &str, info: &[u8]) -> Option<()> {
             if is_receipt(&message) {
                 return None; // delivery receipts are noise to a listener
             }
-            let message = message.rsplit_once('{').map_or(message.as_str(), |(m, _id)| m);
+            let message = message
+                .rsplit_once('{')
+                .map_or(message.as_str(), |(m, _id)| m);
             p.kind = Kind::Message;
             p.addressee = Some(text(addressee));
             p.text = message.trim().to_owned();
@@ -219,7 +233,10 @@ fn fill(p: &mut Packet, to: &str, info: &[u8]) -> Option<()> {
             if from.is_empty() || !from.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
                 return None;
             }
-            *p = Packet { direct: false, ..parse_info(from, to.split(',').next()?, &body[colon + 1..]) };
+            *p = Packet {
+                direct: false,
+                ..parse_info(from, to.split(',').next()?, &body[colon + 1..])
+            };
             Some(())
         }
         // A GPS sentence sent as is, by trackers in NMEA mode.
@@ -241,30 +258,53 @@ fn is_receipt(m: &str) -> bool {
         return false;
     };
     let (id, reply) = rest.split_once('}').unwrap_or((rest, ""));
-    (1..=5).contains(&id.len()) && reply.len() <= 5 && id.bytes().chain(reply.bytes()).all(|b| b.is_ascii_alphanumeric())
+    (1..=5).contains(&id.len())
+        && reply.len() <= 5
+        && id
+            .bytes()
+            .chain(reply.bytes())
+            .all(|b| b.is_ascii_alphanumeric())
 }
 
 /// `GPRMC`, `GPGGA` or `GPGLL` (any talker) without the `$`: positions are
 /// `ddmm.mmmm,N,dddmm.mmmm,W`.
 fn nmea(body: &[u8]) -> Option<Located<'_>> {
     let sentence = std::str::from_utf8(body).ok()?;
-    let sentence = sentence.split_once('*').map_or(sentence, |(s, _checksum)| s);
+    let sentence = sentence
+        .split_once('*')
+        .map_or(sentence, |(s, _checksum)| s);
     let f: Vec<&str> = sentence.trim().split(',').collect();
     let (at, speed, course) = match f.first()?.get(2..)? {
-        "RMC" if *f.get(2)? == "A" => (3, f.get(7)?.parse::<f64>().ok().map(|k| k * KNOT), f.get(8)?.parse().ok()),
+        "RMC" if *f.get(2)? == "A" => (
+            3,
+            f.get(7)?.parse::<f64>().ok().map(|k| k * KNOT),
+            f.get(8)?.parse().ok(),
+        ),
         "GGA" if !matches!(*f.get(6)?, "" | "0") => (2, None, None),
         "GLL" => (1, None, None),
         _ => return None,
     };
     let angle = |i: usize, pos: u8, neg: u8| {
         let v: f64 = f.get(i)?.parse().ok()?;
-        let [h] = f.get(i + 1)?.as_bytes() else { return None };
+        let [h] = f.get(i + 1)?.as_bytes() else {
+            return None;
+        };
         let deg = (v / 100.0).trunc();
         Some((deg + (v - deg * 100.0) / 60.0) * hemisphere(*h, pos, neg)?)
     };
     let (lat, lon) = (angle(at, b'N', b'S')?, angle(at + 2, b'E', b'W')?);
-    let position = Position { lat, lon, symbol: "/>".into(), speed, course };
-    Some(Located { position, rest: &[], number: None })
+    let position = Position {
+        lat,
+        lon,
+        symbol: "/>".into(),
+        speed,
+        course,
+    };
+    Some(Located {
+        position,
+        rest: &[],
+        number: None,
+    })
 }
 
 /// A decoded position plus whatever followed it in the packet.
@@ -324,7 +364,11 @@ fn uncompressed(b: &[u8]) -> Option<Located<'_>> {
     let (mut course, mut number) = (None, None);
     // Either half may be unknown, sent as dots or spaces.
     let field = |d: &[u8]| {
-        if d.iter().all(|&b| b == b'.' || b == b' ') { Some(None) } else { number_in(d).map(Some) }
+        if d.iter().all(|&b| b == b'.' || b == b' ') {
+            Some(None)
+        } else {
+            number_in(d).map(Some)
+        }
     };
     if let [c1, c2, c3, b'/', s1, s2, s3] = rest.get(..7).unwrap_or(&[]) {
         if let (Some(c), Some(s)) = (field(&[*c1, *c2, *c3]), field(&[*s1, *s2, *s3])) {
@@ -332,8 +376,18 @@ fn uncompressed(b: &[u8]) -> Option<Located<'_>> {
             rest = &rest[7..];
         }
     }
-    let position = Position { lat, lon, symbol: symbol(b[8], b[18]), speed: number.map(|n| n * KNOT), course };
-    Some(Located { position, rest, number })
+    let position = Position {
+        lat,
+        lon,
+        symbol: symbol(b[8], b[18]),
+        speed: number.map(|n| n * KNOT),
+        course,
+    };
+    Some(Located {
+        position,
+        rest,
+        number,
+    })
 }
 
 /// `/YYYYXXXX$csT`: base-91 latitude and longitude.
@@ -353,8 +407,18 @@ fn compressed(b: &[u8]) -> Option<Located<'_>> {
     } else {
         (None, None)
     };
-    let position = Position { lat, lon, symbol: symbol(b[0], b[9]), speed, course };
-    Some(Located { position, rest: &b[13..], number: None })
+    let position = Position {
+        lat,
+        lon,
+        symbol: symbol(b[0], b[9]),
+        speed,
+        course,
+    };
+    Some(Located {
+        position,
+        rest: &b[13..],
+        number: None,
+    })
 }
 
 /// Mic-E: latitude lives in the 6-character destination callsign, the rest in
@@ -402,8 +466,18 @@ fn mic_e<'a>(to: &[u8], b: &'a [u8]) -> Option<Located<'a>> {
     if course >= 400 {
         course -= 400;
     }
-    let position = Position { lat, lon, symbol: symbol(b[7], b[6]), speed: Some(knots as f64 * KNOT), course: Some(course as f64) };
-    Some(Located { position, rest: &b[8..], number: None })
+    let position = Position {
+        lat,
+        lon,
+        symbol: symbol(b[7], b[6]),
+        speed: Some(knots as f64 * KNOT),
+        course: Some(course as f64),
+    };
+    Some(Located {
+        position,
+        rest: &b[8..],
+        number: None,
+    })
 }
 
 /// Weather fields are a run of `<letter><digits>` with fixed widths, e.g.
@@ -413,7 +487,11 @@ fn mic_e<'a>(to: &[u8], b: &'a [u8]) -> Option<Located<'a>> {
 /// snowfall instead.
 fn weather(mut b: &[u8], wind: Option<Option<(f64, f64)>>) -> (Weather, &[u8]) {
     let (wind_dir, wind_speed) = wind.flatten().unzip();
-    let mut w = Weather { wind_dir, wind_speed, ..Weather::default() };
+    let mut w = Weather {
+        wind_dir,
+        wind_speed,
+        ..Weather::default()
+    };
     while let Some((&key, rest)) = b.split_first() {
         let width = match key {
             b'c' | b's' | b'g' | b't' | b'r' | b'p' | b'P' | b'L' | b'l' | b'#' => 3,
@@ -421,9 +499,13 @@ fn weather(mut b: &[u8], wind: Option<Option<(f64, f64)>>) -> (Weather, &[u8]) {
             b'b' => 5,
             _ => break,
         };
-        let Some((digits, rest)) = rest.split_at_checked(width) else { break };
+        let Some((digits, rest)) = rest.split_at_checked(width) else {
+            break;
+        };
         // Unknown values are sent as dots or spaces; temperature can be negative.
-        let value = std::str::from_utf8(digits).ok().and_then(|s| s.parse::<f64>().ok());
+        let value = std::str::from_utf8(digits)
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok());
         if value.is_none() && !digits.iter().all(|&d| d == b'.' || d == b' ') {
             break;
         }
@@ -471,7 +553,11 @@ fn hemisphere(c: u8, pos: u8, neg: u8) -> Option<f64> {
 }
 
 fn base91(b: &[u8]) -> Option<f64> {
-    b.iter().try_fold(0.0, |acc, &c| (b'!'..=b'{').contains(&c).then(|| acc * 91.0 + (c - 33) as f64))
+    b.iter().try_fold(0.0, |acc, &c| {
+        (b'!'..=b'{')
+            .contains(&c)
+            .then(|| acc * 91.0 + (c - 33) as f64)
+    })
 }
 
 fn symbol(table: u8, code: u8) -> String {
@@ -480,7 +566,10 @@ fn symbol(table: u8, code: u8) -> String {
 
 /// NUL is legal on air but not in a PostgreSQL text column.
 fn text(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).replace('\0', "").trim().to_owned()
+    String::from_utf8_lossy(b)
+        .replace('\0', "")
+        .trim()
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -500,7 +589,10 @@ mod tests {
         let p = parse("APRS", b"!4903.50N/07201.75W>088/036 hello");
         let pos = p.position.unwrap();
         assert!(close(pos.lat, 49.058_333) && close(pos.lon, -72.029_167));
-        assert_eq!((p.kind, pos.symbol.as_str(), pos.course), (Kind::Position, "/>", Some(88.0)));
+        assert_eq!(
+            (p.kind, pos.symbol.as_str(), pos.course),
+            (Kind::Position, "/>", Some(88.0))
+        );
         assert!(close(pos.speed.unwrap(), 36.0 * KNOT));
         assert_eq!((p.name.as_str(), p.text.as_str()), ("N0CALL", "hello"));
     }
@@ -536,7 +628,10 @@ mod tests {
     #[test]
     fn compressed_rejects_what_is_not_a_position() {
         // An Ultimeter `!!` log line, and a byte outside base-91.
-        for junk in [&b"!!000B00490000001300000000000000000000000000"[..], b"=/5L!|<*e7>7P["] {
+        for junk in [
+            &b"!!000B00490000001300000000000000000000000000"[..],
+            b"=/5L!|<*e7>7P[",
+        ] {
             let p = parse("APRS", junk);
             assert_eq!((p.kind, p.position), (Kind::Other, None), "{junk:?}");
         }
@@ -559,28 +654,48 @@ mod tests {
         let p = parse("S32UVT", b"`(_fn\"Oj/]hi");
         let pos = p.position.unwrap();
         assert!(close(pos.lat, 33.0 + 25.64 / 60.0) && close(pos.lon, -(112.0 + 7.74 / 60.0)));
-        assert_eq!((pos.symbol.as_str(), pos.course, p.text.as_str()), ("/j", Some(251.0), "]hi"));
+        assert_eq!(
+            (pos.symbol.as_str(), pos.course, p.text.as_str()),
+            ("/j", Some(251.0), "]hi")
+        );
         assert!(close(pos.speed.unwrap(), 20.0 * KNOT));
     }
 
     #[test]
     fn weather_station() {
         // APRS101 ch. 12: wind 220 degrees at 4 mph gusting 5, 77 F, 50 %, 990.0 hPa.
-        let p = parse("APRS", b"@092345z4903.50N/07201.75W_220/004g005t077r000p000P000h50b09900wRSW");
+        let p = parse(
+            "APRS",
+            b"@092345z4903.50N/07201.75W_220/004g005t077r000p000P000h50b09900wRSW",
+        );
         let w = p.weather.unwrap();
         assert_eq!((p.kind, p.text.as_str()), (Kind::Weather, "wRSW"));
-        assert_eq!((w.wind_dir, w.humidity, w.pressure_hpa, w.rain_1h_mm), (Some(220.0), Some(50.0), Some(990.0), Some(0.0)));
-        assert!(close(w.wind_speed.unwrap(), 4.0 * MPH) && close(w.gust.unwrap(), 5.0 * MPH) && close(w.temp_c.unwrap(), 25.0));
+        assert_eq!(
+            (w.wind_dir, w.humidity, w.pressure_hpa, w.rain_1h_mm),
+            (Some(220.0), Some(50.0), Some(990.0), Some(0.0))
+        );
+        assert!(
+            close(w.wind_speed.unwrap(), 4.0 * MPH)
+                && close(w.gust.unwrap(), 5.0 * MPH)
+                && close(w.temp_c.unwrap(), 25.0)
+        );
         let pos = p.position.unwrap();
         assert_eq!((pos.speed, pos.course), (None, None));
     }
 
     #[test]
     fn weather_station_without_wind_sensor() {
-        for info in [&b"!4903.50N/07201.75W_.../...g...t054r000p000h72b10132"[..], b"@171800z4903.50N/07201.75W_   /   g...t054h72b10132"] {
+        for info in [
+            &b"!4903.50N/07201.75W_.../...g...t054r000p000h72b10132"[..],
+            b"@171800z4903.50N/07201.75W_   /   g...t054h72b10132",
+        ] {
             let p = parse("APRS", info);
             let w = p.weather.unwrap();
-            assert_eq!((w.wind_dir, w.wind_speed, w.humidity, w.pressure_hpa), (None, None, Some(72.0), Some(1013.2)), "{info:?}");
+            assert_eq!(
+                (w.wind_dir, w.wind_speed, w.humidity, w.pressure_hpa),
+                (None, None, Some(72.0), Some(1013.2)),
+                "{info:?}"
+            );
             assert!(close(w.temp_c.unwrap(), 12.222_2));
             assert_eq!(p.text, "");
         }
@@ -588,21 +703,37 @@ mod tests {
 
     #[test]
     fn snowfall_after_a_position_is_not_wind() {
-        let w = parse("APRS", b"!4903.50N/07201.75W_220/004g005t028r000p000h90b10132s012").weather.unwrap();
+        let w = parse(
+            "APRS",
+            b"!4903.50N/07201.75W_220/004g005t028r000p000h90b10132s012",
+        )
+        .weather
+        .unwrap();
         assert!(close(w.wind_speed.unwrap(), 4.0 * MPH));
     }
 
     #[test]
     fn weather_without_position_and_with_gaps() {
-        let w = parse("APRS", b"_10090556c220s004g...t-07h00").weather.unwrap();
-        assert_eq!((w.wind_dir, w.gust, w.humidity), (Some(220.0), None, Some(100.0)));
+        let w = parse("APRS", b"_10090556c220s004g...t-07h00")
+            .weather
+            .unwrap();
+        assert_eq!(
+            (w.wind_dir, w.gust, w.humidity),
+            (Some(220.0), None, Some(100.0))
+        );
         assert!(close(w.temp_c.unwrap(), -21.666_7));
     }
 
     #[test]
     fn objects_and_items_are_named_things_that_can_be_withdrawn() {
-        let p = parse("APRS", b";HWY26 CLS*092345z4530.00N/12130.00W'Closed at MP 42: crash");
-        assert_eq!((p.kind, p.name.as_str(), p.alive), (Kind::Object, "HWY26 CLS", true));
+        let p = parse(
+            "APRS",
+            b";HWY26 CLS*092345z4530.00N/12130.00W'Closed at MP 42: crash",
+        );
+        assert_eq!(
+            (p.kind, p.name.as_str(), p.alive),
+            (Kind::Object, "HWY26 CLS", true)
+        );
         assert_eq!(p.text, "Closed at MP 42: crash");
         assert!(close(p.position.unwrap().lat, 45.5));
 
@@ -610,41 +741,84 @@ mod tests {
         assert_eq!((gone.name.as_str(), gone.alive), ("HWY26 CLS", false));
 
         let item = parse("APRS", b")FIRE!4530.00N/12130.00W: Brush fire");
-        assert_eq!((item.kind, item.name.as_str(), item.alive, item.text.as_str()), (Kind::Object, "FIRE", true, "Brush fire"));
+        assert_eq!(
+            (
+                item.kind,
+                item.name.as_str(),
+                item.alive,
+                item.text.as_str()
+            ),
+            (Kind::Object, "FIRE", true, "Brush fire")
+        );
         assert!(!parse("APRS", b")FIRE_4530.00N/12130.00W:").alive);
     }
 
     #[test]
     fn messages_and_bulletins() {
         let p = parse("APRS", b":NWS-WARN :Red flag warning until 8PM PDT{ab12");
-        assert_eq!((p.kind, p.addressee.as_deref(), p.text.as_str()), (Kind::Message, Some("NWS-WARN"), "Red flag warning until 8PM PDT"));
-        assert_eq!(parse("APRS", b":BLN1     :Net tonight 7pm").addressee.as_deref(), Some("BLN1"));
+        assert_eq!(
+            (p.kind, p.addressee.as_deref(), p.text.as_str()),
+            (
+                Kind::Message,
+                Some("NWS-WARN"),
+                "Red flag warning until 8PM PDT"
+            )
+        );
+        assert_eq!(
+            parse("APRS", b":BLN1     :Net tonight 7pm")
+                .addressee
+                .as_deref(),
+            Some("BLN1")
+        );
         assert_eq!(parse("APRS", b":N0CALL-9 :ack12").kind, Kind::Other);
         assert_eq!(parse("APRS", b":N0CALL-9 :rej3}AB").kind, Kind::Other);
         for (info, to, text) in [
-            (&b":BLN1     :ack from EOC received{03"[..], "BLN1", "ack from EOC received"),
-            (b":NWS-WARN :rejoin I-84 at exit 17", "NWS-WARN", "rejoin I-84 at exit 17"),
+            (
+                &b":BLN1     :ack from EOC received{03"[..],
+                "BLN1",
+                "ack from EOC received",
+            ),
+            (
+                b":NWS-WARN :rejoin I-84 at exit 17",
+                "NWS-WARN",
+                "rejoin I-84 at exit 17",
+            ),
         ] {
             let p = parse("APRS", info);
-            assert_eq!((p.kind, p.addressee.as_deref(), p.text.as_str()), (Kind::Message, Some(to), text));
+            assert_eq!(
+                (p.kind, p.addressee.as_deref(), p.text.as_str()),
+                (Kind::Message, Some(to), text)
+            );
         }
     }
 
     #[test]
     fn raw_nmea_positions() {
-        let p = parse("GPS", b"$GPRMC,231225,A,4530.1234,N,12230.5678,W,012.3,090.0,220926,,*6A");
+        let p = parse(
+            "GPS",
+            b"$GPRMC,231225,A,4530.1234,N,12230.5678,W,012.3,090.0,220926,,*6A",
+        );
         let pos = p.position.unwrap();
         assert_eq!(p.kind, Kind::Position);
         assert!(close(pos.lat, 45.0 + 30.1234 / 60.0) && close(pos.lon, -(122.0 + 30.5678 / 60.0)));
         assert!(close(pos.speed.unwrap(), 12.3 * KNOT));
         assert_eq!(pos.course, Some(90.0));
 
-        let pos = parse("GPS", b"$GPGGA,231225,4530.1234,S,01230.5678,E,1,08,0.9,545.4,M,46.9,M,,*47").position.unwrap();
+        let pos = parse(
+            "GPS",
+            b"$GPGGA,231225,4530.1234,S,01230.5678,E,1,08,0.9,545.4,M,46.9,M,,*47",
+        )
+        .position
+        .unwrap();
         assert!(close(pos.lat, -(45.0 + 30.1234 / 60.0)) && close(pos.lon, 12.0 + 30.5678 / 60.0));
         assert_eq!((pos.speed, pos.course), (None, None));
 
         // No fix yet (RMC status V, GGA quality 0), and a sentence we do not read.
-        for junk in [&b"$GPRMC,231225,V,,,,,,,220926,,*33"[..], b"$GPGGA,231225,4530.1234,N,12230.5678,W,0,00,,,M,,M,,*47", b"$ULTW0000000102F8"] {
+        for junk in [
+            &b"$GPRMC,231225,V,,,,,,,220926,,*33"[..],
+            b"$GPGGA,231225,4530.1234,N,12230.5678,W,0,00,,,M,,M,,*47",
+            b"$ULTW0000000102F8",
+        ] {
             assert_eq!(parse("GPS", junk).position, None, "{junk:?}");
         }
     }
@@ -658,19 +832,41 @@ mod tests {
 
     #[test]
     fn third_party_bulletin() {
-        let p = parse("APRS", b"}NWSPQR>APRS,TCPIP*,qAC,T2ONTARIO::NWS-WARN :Red flag warning until 8PM PDT{a1");
-        assert_eq!((p.kind, p.from.as_str(), p.direct), (Kind::Message, "NWSPQR", false));
-        assert_eq!((p.addressee.as_deref(), p.text.as_str()), (Some("NWS-WARN"), "Red flag warning until 8PM PDT"));
+        let p = parse(
+            "APRS",
+            b"}NWSPQR>APRS,TCPIP*,qAC,T2ONTARIO::NWS-WARN :Red flag warning until 8PM PDT{a1",
+        );
+        assert_eq!(
+            (p.kind, p.from.as_str(), p.direct),
+            (Kind::Message, "NWSPQR", false)
+        );
+        assert_eq!(
+            (p.addressee.as_deref(), p.text.as_str()),
+            (Some("NWS-WARN"), "Red flag warning until 8PM PDT")
+        );
         assert_eq!(parse("APRS", b"}no header here").kind, Kind::Other);
     }
 
     #[test]
     fn status_and_garbage() {
         let status = parse("APRS", b">On the road");
-        assert_eq!((status.kind, status.text.as_str()), (Kind::Status, "On the road"));
-        for junk in [&b""[..], b"!not a position at all", b"!9903.50N/07201.75W>", b";SHORT", b"?APRS?"] {
+        assert_eq!(
+            (status.kind, status.text.as_str()),
+            (Kind::Status, "On the road")
+        );
+        for junk in [
+            &b""[..],
+            b"!not a position at all",
+            b"!9903.50N/07201.75W>",
+            b";SHORT",
+            b"?APRS?",
+        ] {
             let p = parse("APRS", junk);
-            assert_eq!((p.kind, p.position, p.name.as_str()), (Kind::Other, None, "N0CALL"), "{junk:?}");
+            assert_eq!(
+                (p.kind, p.position, p.name.as_str()),
+                (Kind::Other, None, "N0CALL"),
+                "{junk:?}"
+            );
         }
     }
 
@@ -682,16 +878,31 @@ mod tests {
             a
         }
         let frame = |repeated| {
-            let mut f = [addr("APRS", 0, false, false), addr("N0CALL", 9, false, false), addr("WIDE1", 1, repeated, true)].concat();
+            let mut f = [
+                addr("APRS", 0, false, false),
+                addr("N0CALL", 9, false, false),
+                addr("WIDE1", 1, repeated, true),
+            ]
+            .concat();
             f.extend_from_slice(b"\x03\xF0!4903.50N/07201.75W>");
             f
         };
         let p = parse_frame(&frame(false)).unwrap();
-        assert_eq!((p.from.as_str(), p.direct, p.raw.as_str()), ("N0CALL-9", true, "N0CALL-9>APRS,WIDE1-1:!4903.50N/07201.75W>"));
+        assert_eq!(
+            (p.from.as_str(), p.direct, p.raw.as_str()),
+            (
+                "N0CALL-9",
+                true,
+                "N0CALL-9>APRS,WIDE1-1:!4903.50N/07201.75W>"
+            )
+        );
         assert!(p.position.is_some());
 
         let relayed = parse_frame(&frame(true)).unwrap();
-        assert_eq!((relayed.direct, relayed.raw.split(':').next()), (false, Some("N0CALL-9>APRS,WIDE1-1*")));
+        assert_eq!(
+            (relayed.direct, relayed.raw.split(':').next()),
+            (false, Some("N0CALL-9>APRS,WIDE1-1*"))
+        );
         assert!(parse_frame(&frame(false)[..10]).is_none());
 
         // UI with the poll/final bit set.
@@ -700,20 +911,33 @@ mod tests {
         assert!(parse_frame(&pf).unwrap().position.is_some());
 
         // Mic-E destination with an SSID.
-        let mut mic = [addr("S32UVT", 1, false, false), addr("N0CALL", 9, false, true)].concat();
+        let mut mic = [
+            addr("S32UVT", 1, false, false),
+            addr("N0CALL", 9, false, true),
+        ]
+        .concat();
         mic.extend_from_slice(b"\x03\xF0`(_fn\"Oj/]hi");
         let p = parse_frame(&mic).unwrap();
         assert!(close(p.position.unwrap().lat, 33.0 + 25.64 / 60.0));
 
         // Third party: relayed by the igate we heard, so not direct.
-        let mut tp = [addr("APRS", 0, false, false), addr("KF7XYZ", 10, false, true)].concat();
+        let mut tp = [
+            addr("APRS", 0, false, false),
+            addr("KF7XYZ", 10, false, true),
+        ]
+        .concat();
         tp.extend_from_slice(b"\x03\xF0}NWSPQR>APRS,TCPIP*::NWS-WARN :Red flag");
         let p = parse_frame(&tp).unwrap();
-        assert_eq!((p.from.as_str(), p.direct, p.kind), ("NWSPQR", false, Kind::Message));
+        assert_eq!(
+            (p.from.as_str(), p.direct, p.kind),
+            ("NWSPQR", false, Kind::Message)
+        );
         assert!(p.raw.starts_with("KF7XYZ-10>APRS:}NWSPQR"));
 
         // More than ten addresses (two plus eight digipeaters) is not AX.25.
-        let mut long: Vec<u8> = (0..11).flat_map(|i| addr("WIDE1", 1, false, i == 10)).collect();
+        let mut long: Vec<u8> = (0..11)
+            .flat_map(|i| addr("WIDE1", 1, false, i == 10))
+            .collect();
         long.extend_from_slice(b"\x03\xF0>hi");
         assert!(parse_frame(&long).is_none());
     }

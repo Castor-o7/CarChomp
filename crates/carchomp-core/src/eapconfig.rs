@@ -68,7 +68,10 @@ pub fn parse(xml: &str) -> Result<Profile, String> {
     let mut ca_pem = String::new();
     for ca in server.iter().flat_map(|s| children(*s, "CA")) {
         // An empty element is no CA at all.
-        if attr_is(ca, "format", "X.509") && attr_is(ca, "encoding", "base64") && !text(ca).trim().is_empty() {
+        if attr_is(ca, "format", "X.509")
+            && attr_is(ca, "encoding", "base64")
+            && !text(ca).trim().is_empty()
+        {
             let der = base64_decode(text(ca)).ok_or("a CA certificate is not valid base64")?;
             ca_pem.push_str(&pem("CERTIFICATE", &der));
         }
@@ -449,8 +452,14 @@ mod tests {
         p.client_p12 = Some(b"KEYBYTES".to_vec());
         p.passphrase = Some("hunter2".into());
         let shown = format!("{p:?}");
-        assert!(!shown.contains("hunter2") && !shown.contains("75, 69, 89"), "{shown}");
-        assert!(shown.contains("<redacted>") && shown.contains("radius1.example.edu"), "{shown}");
+        assert!(
+            !shown.contains("hunter2") && !shown.contains("75, 69, 89"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("<redacted>") && shown.contains("radius1.example.edu"),
+            "{shown}"
+        );
     }
 
     #[test]
