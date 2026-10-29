@@ -370,11 +370,11 @@ fn uncompressed(b: &[u8]) -> Option<Located<'_>> {
             number_in(d).map(Some)
         }
     };
-    if let [c1, c2, c3, b'/', s1, s2, s3] = rest.get(..7).unwrap_or(&[]) {
-        if let (Some(c), Some(s)) = (field(&[*c1, *c2, *c3]), field(&[*s1, *s2, *s3])) {
-            (course, number) = (c, s);
-            rest = &rest[7..];
-        }
+    if let [c1, c2, c3, b'/', s1, s2, s3] = rest.get(..7).unwrap_or(&[])
+        && let (Some(c), Some(s)) = (field(&[*c1, *c2, *c3]), field(&[*s1, *s2, *s3]))
+    {
+        (course, number) = (c, s);
+        rest = &rest[7..];
     }
     let position = Position {
         lat,
