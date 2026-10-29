@@ -2,6 +2,10 @@
 //! to a hotspot when no known network is in range needs no code at all: it is
 //! a low-priority NetworkManager profile created by the installer.
 
+// Helpers here return a finished HTTP `Response` as their error so handlers
+// can bail out with `?`. It is 128 bytes, but these run once per request.
+#![allow(clippy::result_large_err)]
+
 use axum::{
     Json, Router,
     extract::Path,
