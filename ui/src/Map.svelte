@@ -83,11 +83,14 @@
       ready = true;
     });
 
-    const moved = () => {
-      const b = map.getBounds();
-      ui.bounds = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
-      if (ready) loadTracks(false);
-    };
+    // untrack: setPadding fires moveend synchronously, so this can run inside an
+    // effect, which would then depend on the ui.bounds it writes and loop forever.
+    const moved = () =>
+      untrack(() => {
+        const b = map.getBounds();
+        ui.bounds = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+        if (ready) loadTracks(false);
+      });
     map.on('moveend', moved);
     moved();
     map.on('dragstart', () => (ui.follow = false));
