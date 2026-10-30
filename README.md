@@ -44,6 +44,110 @@ the carputer capstone, built from the stakeholder's original directive
     tools/sim.py           stand-in for the sensors: pretend gpsd + APRS TNC
     tools/fetch_map_assets.sh   fonts + sprites for the offline map
 
+## How it works
+
+### What APRS is, and why a car computer listens to it
+
+APRS (Automatic Packet Reporting System) is a ham radio network for sharing local information.
+Stations broadcast short digital packets on one shared frequency, 144.39 MHz in North America:
+where they are, the weather where they are, or a message for everyone nearby. Any station in range
+can decode them. Digipeaters relay packets further, so a mountaintop repeater can carry a car's
+position across a region.
+
+Transmitting takes an amateur radio license, but receiving doesn't, and CarChomp only receives. It
+has no way to transmit: Direwolf is configured without transmit audio, push-to-talk or beacons, and
+an RTL-SDR dongle is receive-only hardware anyway.
+
+The stakeholder's brief asks for surrounding stations to be logged and shown on the map. The other
+reason to listen is that APRS needs no cell signal or internet, which suits a car on back roads.
+CarChomp sorts what it hears like this:
+
+| Packet | What you see |
+|---|---|
+| Positions | Stations on the optional map layer, dropped after an hour unheard |
+| Weather reports | Weather stations on the map, with their readings |
+| Objects and items | Named things at a place, such as a brush fire or a road closure, listed as incidents until the sender withdraws them or they go unheard for an hour |
+| Bulletins and weather-service messages | The Alerts list. Private messages between stations are left out |
+
+What you hear depends on who is transmitting nearby and whether their signal reaches you. Treat it
+as extra awareness, not as a complete or official alert service.
+
+### How RF gets into the software
+
+The radio work is done by existing tools. CarChomp starts where the radio signal has already
+become bytes:
+
+```
+antenna + RTL-SDR dongle
+   │  radio signal on 144.39 MHz
+rtl_fm                      FM demodulator: turns the signal into audio
+   │  24 kHz audio, over a pipe
+Direwolf                    software modem: decodes 1200-baud AX.25 packets from the audio
+   │  KISS frames, over TCP on port 8001
+carchompd source task       unframes KISS, parses APRS (carchomp-core, no I/O)
+   │  Observation on the bus
+   ├─► recorder             aprs_packet in PostGIS, keeping the original text
+   └─► WebSocket            map overlay and APRS panel, live
+```
+
+- **Same pipeline as GPS.** An APRS packet is one more `Observation` from a `source`, as a GPS fix
+  is. The design aims to let future sources join without changing how existing ones are stored.
+- **A TNC is just a port.** carchompd only sees a TCP port speaking KISS. Direwolf, a hardware TNC
+  behind a bridge and `tools/sim.py` all look alike, which is how the radio path is tested without
+  a radio.
+- **Failures stay contained.** The radio runs as its own service, `carchomp-radio.service`. If it
+  dies or was never plugged in, carchompd keeps retrying the connection and everything else carries on.
+- **Nothing is thrown away.** Every packet keeps its full text, so a better parser can re-read old
+  data later.
+- **Groundwork for finding position by radio.** A packet no digipeater relayed was heard directly
+  from its sender, so that sender is within radio range. `aprs_packet.direct` records this. It could
+  one day give a coarse position, within kilometres, from stations with known locations. That's a
+  stretch goal and isn't built ([DESIGN.md](DESIGN.md#position-from-rf-stretch-goal)).
+
+The frequency is set in `deploy/carchomp-radio.service`. Outside North America, change it to your
+region's APRS frequency (144.80 MHz in Europe).
+
+### SmartBeaconing: deciding which points to keep
+
+SmartBeaconing was created by Tony Arnerich (KD7TA) and Steve Bragg (KA9MVA) for the HamHUD tracker.
+A moving APRS station shouldn't crowd the shared channel by transmitting on a fixed timer, but a
+slow timer draws a bad map: on a fixed 30-second timer, a parked car repeats itself while a car on
+a winding road skips its bends. SmartBeaconing reports according to how you're moving: rarely when
+stopped, more often as you speed up, and right away when you turn.
+
+CarChomp never transmits its position, so it borrows the idea for **storage**. gpsd delivers a fix
+every second, and the screen shows all of them. SmartBeaconing decides which ones are written to the
+database:
+
+1. **Stopped (under 2 m/s, about 4.5 mph):** keep the point where you came to rest, since the power
+   may be cut at any moment, then one every 2 minutes. Turns are ignored, because GPS course is
+   just noise at walking pace.
+2. **Moving:** wait `fast_rate × high_speed ÷ speed` seconds between points, limited to between 15
+   and 120 seconds. Between about 8 and 60 mph, that works out to one point every 405 m whatever
+   your speed.
+3. **Turning:** if your heading has changed from the last stored point by more than
+   `turn_min + turn_slope ÷ speed` degrees, keep a point now, at most once every 3 seconds. Slower
+   vehicles have to turn further, because their course wobbles more.
+
+With the defaults:
+
+| Speed | Stored while going straight | Turn that counts as a corner |
+|---|---|---|
+| Under 4.5 mph | Every 120 s | Turns ignored |
+| 10 mph | Every 91 s (405 m) | 35° |
+| 30 mph | Every 30 s (405 m) | 18° |
+| 60 mph | Every 15 s (405 m) | 14° |
+| 75 mph | Every 15 s (503 m) | 13° |
+
+CarChomp adds one thing for storage. A turn only shows up once you're already past it, so a
+corner stores two points: the current fix and the one just before it. Otherwise the stored line
+would cut the corner.
+
+The *New road* check doesn't depend on any of this. It runs on its own schedule whether or not the
+current fix gets stored. Imported drives with timestamps go through the same filter. Ones without
+timestamps, such as a planned route, have no speed to filter by and are kept whole. To tune it, use the `[beacon]` settings in
+[carchompd.example.toml](carchompd.example.toml) (metres per second, seconds, degrees).
+
 ## Try it
 
     docker compose -f compose.dev.yml up -d --wait       # PostGIS on :5433
