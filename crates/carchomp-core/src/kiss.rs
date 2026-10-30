@@ -31,10 +31,12 @@ impl Decoder {
             match (b, self.escaped) {
                 (FEND, _) => {
                     // Command byte: high nibble is the TNC port, low nibble 0 = data.
-                    if let [cmd, payload @ ..] = &self.buf[..] {
-                        if cmd & 0x0F == 0 && !payload.is_empty() && !self.overflow {
-                            on_frame(payload);
-                        }
+                    if let [cmd, payload @ ..] = &self.buf[..]
+                        && cmd & 0x0F == 0
+                        && !payload.is_empty()
+                        && !self.overflow
+                    {
+                        on_frame(payload);
                     }
                     self.buf.clear();
                     self.escaped = false;
