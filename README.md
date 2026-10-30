@@ -1,11 +1,41 @@
+<p align="center"><img src="docs/banner.svg" alt="CarChomp: take a chomp out of your drive" width="100%"></p>
+
 # CarChomp
 
-*Take a chomp out of your drive.*
+[![CI](https://github.com/Castor-o7/CarChomp/actions/workflows/ci.yml/badge.svg)](https://github.com/Castor-o7/CarChomp/actions/workflows/ci.yml)
 
-A Raspberry Pi car computer that tracks your drives and tells you when you're
-on a road you've never driven. A from-scratch take on the carputer capstone,
-built from the stakeholder's original directive ([stakeholder.md](stakeholder.md)). Design and roadmap:
-[DESIGN.md](DESIGN.md).
+Google Maps knows where you are. CarChomp knows where you've *been*. It's a Raspberry Pi car
+computer that records every drive and tells you, at a glance, when you're on a road you've
+never driven.
+
+- **"Have I driven this road?"** The badge reads *Been here* or *New road*, with an optional
+  chirp as you leave known road. Matching follows your heading, so crossing an old track at
+  an intersection doesn't count, and it needs no road-network data.
+- **Keeps the shape, not every point.** The APRS SmartBeaconing algorithm decides what gets
+  stored: little on a straight road, every bend on a switchback. The screen still sees every fix.
+- **Hears what's around you.** Receive-only APRS through an RTL-SDR dongle brings in nearby
+  stations, weather, road closures, fires and bulletins. No radio license needed.
+- **Works without a network.** Download map regions for offline use. When no known Wi-Fi is in
+  range, it hosts its own hotspot, and it takes its clock from the GPS.
+- **Touchscreen in the car, browser everywhere else.** One app handles both, including GPX and
+  GeoJSON import, GPX export, Wi-Fi, system health and software updates. It can also run headless.
+
+<p align="center"><img src="docs/screenshot.png" alt="The CarChomp map with a green New road badge at 26 mph, as today's orange track turns away from the blue track of an earlier drive" width="800"></p>
+
+<p align="center"><img src="docs/screenshot-aprs.png" alt="The APRS panel beside the map, listing a red flag warning, a net bulletin, a brush fire and a highway closure" width="800"></p>
+
+<p align="center"><sub>Real UI on simulated sensors: <code>tools/sim.py</code> replaying a drive past an imported one.</sub></p>
+
+It's one Rust daemon, one PostgreSQL/PostGIS database and one Svelte app: a from-scratch take on
+the carputer capstone, built from the stakeholder's original directive
+([stakeholder.md](stakeholder.md)). Design and roadmap: [DESIGN.md](DESIGN.md).
+
+> [!IMPORTANT]
+> **CarChomp hasn't met a real GPS or radio yet.** Everything is developed and tested against
+> `tools/sim.py`. GPS, RTL-SDR/Direwolf, chrony, Wi-Fi/hotspot and the web update upload are
+> untested on hardware, and the SD-card image build hasn't been run yet.
+
+## Layout
 
     crates/carchomp-core   pure logic: gpsd, SmartBeaconing, KISS, APRS  (no I/O)
     crates/carchompd       the daemon: sources -> bus -> PostGIS, /ws, /api
