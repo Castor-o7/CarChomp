@@ -173,7 +173,7 @@ if [ -f "$root/Cargo.toml" ]; then
     PATH="$HOME/.cargo/bin:$PATH"
     # Distro cargo is too old for edition 2024 on bookworm.
     v=$(cargo --version 2>/dev/null | cut -d' ' -f2) || v=""
-    if [ -z "$v" ] || [ "$(printf '%s\n1.85.0\n' "$v" | sort -V | head -n1)" != 1.85.0 ]; then
+    if [ -z "$v" ] || [ "$(printf '%s\n1.88.0\n' "$v" | sort -V | head -n1)" != 1.88.0 ]; then
         if command -v rustup >/dev/null; then rustup toolchain install stable --profile minimal && rustup default stable
         else curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal; fi
     fi

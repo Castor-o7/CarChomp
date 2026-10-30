@@ -1,7 +1,10 @@
 <script>
   import { layers, namedFlavor } from '@protomaps/basemaps';
-  import maplibregl from 'maplibre-gl';
+  import * as maplibregl from 'maplibre-gl';
   import 'maplibre-gl/dist/maplibre-gl.css';
+  // MapLibre 6 finds its worker through import.meta.url, which Vite cannot
+  // follow; ?worker&url bundles the worker as its own file instead.
+  import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
   import { PMTiles, Protocol } from 'pmtiles';
   import { onMount, untrack } from 'svelte';
   import { describe } from './aprs.js';
@@ -14,6 +17,7 @@
   // Keeps one reader per archive URL; a region downloaded again under the
   // same name has the same URL, so readers are dropped on every rebuild.
   const protocol = new Protocol();
+  maplibregl.setWorkerUrl(workerUrl);
   maplibregl.addProtocol('pmtiles', protocol.tile);
 
   // Online OpenStreetMap tiles are always the bottom layer. Offline regions
@@ -83,11 +87,14 @@
       ready = true;
     });
 
-    const moved = () => {
-      const b = map.getBounds();
-      ui.bounds = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
-      if (ready) loadTracks(false);
-    };
+    // untrack: setPadding fires moveend synchronously, so this can run inside an
+    // effect, which would then depend on the ui.bounds it writes and loop forever.
+    const moved = () =>
+      untrack(() => {
+        const b = map.getBounds();
+        ui.bounds = [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+        if (ready) loadTracks(false);
+      });
     map.on('moveend', moved);
     moved();
     map.on('dragstart', () => (ui.follow = false));

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" role="img" aria-labelledby="t d" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title id="t">CarChomp</title>
+  <desc id="d">A map where a blue track of an earlier drive forks from an orange track of today's drive, with a green New road badge, and the tagline: take a chomp out of your drive.</desc>
+  <defs>
+    <pattern id="grid" width="28" height="28" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.2" fill="#232a36"/></pattern>
+  </defs>
+  <rect width="1200" height="340" rx="16" fill="#0d1016"/>
+  <rect width="1200" height="340" rx="16" fill="url(#grid)"/>
+  <text x="64" y="118" fill="#e8ebf0" font-size="58" font-weight="700" letter-spacing="-1">CarChomp</text>
+  <text x="66" y="166" fill="#b4bcc9" font-size="26">Take a chomp out of your drive.</text>
+  <g font-size="17" font-weight="600">
+    <rect x="66" y="214" width="44" height="10" rx="5" fill="#3b82f6"/>
+    <text x="124" y="225" fill="#3b82f6">Roads you've driven</text>
+    <rect x="66" y="254" width="44" height="10" rx="5" fill="#f97316"/>
+    <text x="124" y="265" fill="#f97316">The drive you're on</text>
+  </g>
+  <g stroke="#232a36" stroke-width="4" fill="none">
+    <path d="M640 92H1160M640 170H1160M640 248H1160M720 40V310M850 40V310M980 40V310M1110 40V310"/>
+  </g>
+  <path d="M640 170H850V92H1110" fill="none" stroke="#3b82f6" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" opacity=".75"/>
+  <path d="M640 170H850V248H968" fill="none" stroke="#f97316" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M1006 248 966 266 974 248 966 230Z" fill="#2563eb" stroke="#fff" stroke-width="3" stroke-linejoin="round"/>
+  <g font-weight="700" text-anchor="middle">
+    <rect x="896" y="150" width="172" height="58" rx="14" fill="#16a34a"/>
+    <text x="982" y="189" fill="#fff" font-size="28">New road</text>
+  </g>
+</svg>
