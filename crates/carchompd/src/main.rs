@@ -306,3 +306,28 @@ mod tests {
         assert_eq!(to_bind(&list), list);
     }
 }
+
+/// For tests that commit: each gets a database of its own at `DATABASE_URL`'s
+/// server, recreated on every run, so they cannot touch development data.
+#[cfg(test)]
+mod test_db {
+    use sqlx::{Executor, PgPool};
+
+    pub async fn create(name: &str) -> PgPool {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let admin = PgPool::connect(&url).await.unwrap();
+        let db = format!("carchomp_test_{name}");
+        admin
+            .execute(format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)").as_str())
+            .await
+            .unwrap();
+        admin
+            .execute(format!("CREATE DATABASE {db}").as_str())
+            .await
+            .unwrap();
+        let (server, _) = url.rsplit_once('/').expect("a database in the URL");
+        let pool = PgPool::connect(&format!("{server}/{db}")).await.unwrap();
+        sqlx::migrate!().run(&pool).await.unwrap();
+        pool
+    }
+}

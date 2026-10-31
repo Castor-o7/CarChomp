@@ -10,7 +10,7 @@ it has run on that hardware.
 
 ## Stories from DESIGN.md's order of work
 
-- [ ] **CHOMP-1: Core types, beaconing, KISS and APRS parsing.** Done when:
+- [x] **CHOMP-1: Core types, beaconing, KISS and APRS parsing.** Done when:
   `cargo test -p carchomp-core` passes in CI.
 - [x] **CHOMP-2: gpsd to database, `/ws`, `/api/tracks`.** Done when: a
   `tools/sim.py` drive creates a track in PostGIS, returned by `/api/tracks` and
@@ -54,10 +54,10 @@ it has run on that hardware.
   and every open Dependabot alert has a recorded decision.
 - [x] **CHOMP-15: CI catches an invalid map style.** Done when: a `line-color`
   expression MapLibre rejects, like the one first written for CHOMP-9, fails CI.
-- [ ] **CHOMP-16: A repo test for the known-road query.** Done when: a test that
+- [x] **CHOMP-16: A repo test for the known-road query.** Done when: a test that
   CI runs against PostGIS exercises `KNOWN_ROAD` and fails if the same road in
   either direction stops counting as known, or a crossing beyond `road_heading`
   starts to.
-- [ ] **CHOMP-17: No sprite 404 on a README dev run.** Done when: following the
+- [x] **CHOMP-17: No sprite 404 on a README dev run.** Done when: following the
   README's "Try it" steps gives a map with no 404 for `sprites/v4/light`, or those
   steps say that the 404 is expected and how to clear it.

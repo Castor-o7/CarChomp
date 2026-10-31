@@ -177,11 +177,11 @@ in `ui/` proxies to the daemon with hot reload. The API by hand:
     curl localhost:8000/api/tracks/1                     # GeoJSON
     curl 'localhost:8000/api/tracks?near=-122.6587,45.5125,50'
 
-`cargo test` runs the tests that need nothing but a Rust toolchain (1.88+). The known-road query
-test needs PostGIS, so it's opt-in, and CI always runs it:
+`cargo test` runs the tests that need nothing but a Rust toolchain (1.88+). A few need PostGIS,
+so they're opt-in, and CI always runs them. Some create their own `carchomp_test_*` databases:
 
     DATABASE_URL=postgres://carchomp:carchomp@localhost:5433/carchomp \
-      cargo test -p carchompd -- --ignored --exact recorder::tests::known_road_query
+      cargo test -p carchompd -- --ignored
 
 ## Install on a Pi
 

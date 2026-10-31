@@ -86,20 +86,7 @@ pub fn run(
     status: watch::Sender<Status>,
     config: &Config,
 ) -> impl Future<Output = ()> + use<> {
-    let mut rec = Recorder {
-        db,
-        bus,
-        params: config.beacon,
-        track_idle: config.track_idle,
-        road_radius: config.road_radius,
-        road_heading: config.road_heading,
-        beacon: SmartBeacon::new(config.beacon),
-        status,
-        last_moving: None,
-        last_road_check: None,
-        idle_deadline: None,
-        last_source: None,
-    };
+    let mut rec = Recorder::new(db, bus, status, config);
     async move {
         let mut events = rec.bus.subscribe();
         if let Err(e) = rec.close_abandoned_tracks().await {
@@ -131,6 +118,23 @@ pub fn run(
 }
 
 impl Recorder {
+    fn new(db: PgPool, bus: Bus, status: watch::Sender<Status>, config: &Config) -> Self {
+        Self {
+            db,
+            bus,
+            params: config.beacon,
+            track_idle: config.track_idle,
+            road_radius: config.road_radius,
+            road_heading: config.road_heading,
+            beacon: SmartBeacon::new(config.beacon),
+            status,
+            last_moving: None,
+            last_road_check: None,
+            idle_deadline: None,
+            last_source: None,
+        }
+    }
+
     async fn fix(&mut self, source: i16, fix: &Fix) -> sqlx::Result<()> {
         let moving = fix.speed.unwrap_or(0.0) >= self.params.low_speed;
         let idle = self
@@ -471,5 +475,89 @@ mod tests {
             !known(&mut tx, current, north_leg, Some(90.0)).await,
             "north leg, eastbound"
         );
+    }
+
+    /// Drives `n` fixes along an east-west road, one per second at 20 m/s,
+    /// and returns the new-road flag after each fix.
+    async fn drive(
+        rec: &mut Recorder,
+        source: i16,
+        start: OffsetDateTime,
+        from: (f64, f64),
+        eastbound: bool,
+        n: u32,
+    ) -> Vec<Option<bool>> {
+        let step = 20.0 / (111_320.0 * from.1.to_radians().cos());
+        let mut flags = Vec::new();
+        for i in 0..n {
+            let along = step * f64::from(i);
+            let fix = Fix {
+                time: start + Duration::seconds(i.into()),
+                lat: from.1,
+                lon: if eastbound {
+                    from.0 + along
+                } else {
+                    from.0 - along
+                },
+                alt: None,
+                speed: Some(20.0),
+                course: Some(if eastbound { 90.0 } else { 270.0 }),
+                h_err: None,
+            };
+            rec.fix(source, &fix).await.unwrap();
+            flags.push(rec.status.borrow().road_new);
+        }
+        flags
+    }
+
+    /// Needs PostGIS: see `known_road_query`. Its own database, as it commits.
+    #[tokio::test]
+    #[ignore = "needs PostGIS at DATABASE_URL"]
+    async fn repeating_a_route_clears_the_new_road_flag() {
+        let db = crate::test_db::create("repeat_route").await;
+        let source = source_id(&db, "gps", "test").await.unwrap();
+        let (bus, _) = tokio::sync::broadcast::channel(16);
+        let (status, _) = watch::channel(Status::default());
+        let mut rec = Recorder::new(db.clone(), bus, status, &Config::default());
+        let t = OffsetDateTime::UNIX_EPOCH + Duration::days(20_000);
+        let lap = Duration::hours(1);
+        let west_end = (-122.70, 45.50);
+        let n = 60; // about 1.2 km
+
+        let first = drive(&mut rec, source, t, west_end, true, n).await;
+        assert!(
+            first.iter().all(|f| *f == Some(true)),
+            "first lap: {first:?}"
+        );
+        rec.end_track().await.unwrap();
+        assert_eq!(*rec.status.borrow(), Status::default(), "track ended");
+        let segments: i64 = sqlx::query_scalar("SELECT count(*) FROM track_segment")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert!(segments > 0, "the first lap was indexed");
+
+        let again = drive(&mut rec, source, t + lap, west_end, true, n).await;
+        assert!(
+            again.iter().all(|f| *f == Some(false)),
+            "second lap: {again:?}"
+        );
+        rec.end_track().await.unwrap();
+
+        // From the east end back: the same road, driven the other way.
+        let step = 20.0 / (111_320.0 * west_end.1.to_radians().cos());
+        let east_end = (west_end.0 + step * f64::from(n - 1), west_end.1);
+        let back = drive(&mut rec, source, t + lap * 2, east_end, false, n).await;
+        assert!(back.iter().all(|f| *f == Some(false)), "reversed: {back:?}");
+        rec.end_track().await.unwrap();
+
+        // A kilometre north: a road never driven is still new after all that.
+        let other = (west_end.0, west_end.1 + 0.009);
+        let elsewhere = drive(&mut rec, source, t + lap * 3, other, true, n).await;
+        assert!(
+            elsewhere.iter().all(|f| *f == Some(true)),
+            "new road: {elsewhere:?}"
+        );
+        rec.end_track().await.unwrap();
     }
 }

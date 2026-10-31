@@ -41,8 +41,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
-      # The tests that need PostGIS. Named, so they cannot be skipped unnoticed.
-      - run: cargo test --locked -p carchompd -- --ignored --exact recorder::tests::known_road_query
+      # The tests that need PostGIS; a plain `cargo test` skips them.
+      - run: cargo test --locked -p carchompd -- --ignored
         env:
           DATABASE_URL: postgres://carchomp:carchomp@localhost:5433/carchomp
 
