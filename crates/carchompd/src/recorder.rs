@@ -53,7 +53,7 @@ const KNOWN_ROAD: &str = "
           AND ST_DWithin(s.geom, ST_MakePoint($2, $3)::geography, $4)
           AND ST_DWithin(edge.geom::geography, ST_MakePoint($2, $3)::geography, $4)
           AND ($5::float8 IS NULL OR $6 >= abs(90 - mod((3690 + $5 - degrees(
-                  ST_Azimuth(ST_StartPoint(edge.geom)::geography, ST_EndPoint(edge.geom)::geography)))::numeric, 180))))";
+                  ST_Azimuth(ST_StartPoint(edge.geom)::geography, ST_EndPoint(edge.geom)::geography)))::numeric, 360))))";
 
 struct Recorder {
     db: PgPool,
