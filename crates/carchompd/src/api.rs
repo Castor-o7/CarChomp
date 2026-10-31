@@ -1072,4 +1072,108 @@ mod tests {
         assert_eq!(fixes[0].time, datetime!(2026-09-17 20:00:01 UTC));
         assert_eq!(fixes[1].time, datetime!(2026-09-17 20:00:01.000001 UTC));
     }
+
+    /// One HTTP request over a real socket; returns the status and the body.
+    async fn http(addr: SocketAddr, method: &str, path: &str, body: &str) -> (u16, String) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let request = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).await.unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").expect("a whole response");
+        assert!(!head.contains("chunked"), "{head}");
+        let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+        (status, body.to_owned())
+    }
+
+    fn close(a: &interchange::Point, b: &interchange::Point) -> bool {
+        (a.lon - b.lon).abs() < 1e-6 && (a.lat - b.lat).abs() < 1e-6
+    }
+
+    /// Needs PostGIS at `DATABASE_URL`, so `cargo test` skips it and CI runs
+    /// it with `--ignored`. Uses a database of its own, as it commits.
+    #[tokio::test]
+    #[ignore = "needs PostGIS at DATABASE_URL"]
+    async fn gpx_round_trip_and_health() {
+        let db = crate::test_db::create("gpx_round_trip").await;
+        let (bus, _) = tokio::sync::broadcast::channel(16);
+        let (status, _) = watch::channel(Status::default());
+        let app = router(db, bus, status, &Config::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        // A planned route: no times, so it is kept whole.
+        let route = r#"<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><trk><name>Round trip</name><trkseg>
+            <trkpt lat="45.5" lon="-122.7"><ele>10.5</ele></trkpt>
+            <trkpt lat="45.502" lon="-122.698"><ele>20.5</ele></trkpt>
+            <trkpt lat="45.501" lon="-122.695"><ele>30.5</ele></trkpt>
+            <trkpt lat="45.504" lon="-122.693"><ele>40.5</ele></trkpt>
+        </trkseg></trk></gpx>"#;
+        let sent = interchange::parse(route).unwrap().remove(0);
+
+        let (code, ids) = http(addr, "POST", "/api/tracks/import", route).await;
+        assert_eq!(code, 200, "{ids}");
+        let ids: Vec<i64> = serde_json::from_str(&ids).unwrap();
+        assert_eq!(ids.len(), 1);
+
+        let path = format!("/api/tracks/{}/gpx", ids[0]);
+        let (code, exported) = http(addr, "GET", &path, "").await;
+        assert_eq!(code, 200);
+        let back = interchange::parse(&exported).unwrap().remove(0);
+        assert_eq!(back.name.as_deref(), Some("Round trip"));
+        assert_eq!(back.points.len(), sent.points.len());
+        for (a, b) in sent.points.iter().zip(&back.points) {
+            assert!(close(a, b), "{a:?} came back as {b:?}");
+            assert_eq!(a.ele, b.ele, "elevation");
+            assert!(b.time.is_some(), "stored points have times");
+        }
+
+        // A recorded drive: thinned on the way in, but its ends and times stay.
+        let timed = r#"<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>
+            <trkpt lat="45.6" lon="-122.7"><time>2026-01-01T10:00:00Z</time></trkpt>
+            <trkpt lat="45.6" lon="-122.698"><time>2026-01-01T10:00:10Z</time></trkpt>
+            <trkpt lat="45.6" lon="-122.696"><time>2026-01-01T10:00:20Z</time></trkpt>
+            <trkpt lat="45.6" lon="-122.694"><time>2026-01-01T10:00:30Z</time></trkpt>
+        </trkseg></trk></gpx>"#;
+        let sent_timed = interchange::parse(timed).unwrap().remove(0);
+        let (code, ids) = http(addr, "POST", "/api/tracks/import", timed).await;
+        assert_eq!(code, 200, "{ids}");
+        let ids: Vec<i64> = serde_json::from_str(&ids).unwrap();
+        let (_, exported) = http(addr, "GET", &format!("/api/tracks/{}/gpx", ids[0]), "").await;
+        let drive = interchange::parse(&exported).unwrap().remove(0);
+        for (a, b) in [
+            (&sent_timed.points[0], &drive.points[0]),
+            (
+                sent_timed.points.last().unwrap(),
+                drive.points.last().unwrap(),
+            ),
+        ] {
+            assert!(close(a, b), "{a:?} came back as {b:?}");
+            assert_eq!(a.time, b.time);
+        }
+
+        // Export all holds both, and imports again as what it was.
+        let (code, all) = http(addr, "GET", "/api/tracks/export.gpx", "").await;
+        assert_eq!(code, 200);
+        let tracks = interchange::parse(&all).unwrap();
+        assert_eq!(tracks.len(), 2);
+        let (code, _) = http(addr, "POST", "/api/tracks/import", &all).await;
+        assert_eq!(code, 200);
+
+        let (code, health) = http(addr, "GET", "/api/health", "").await;
+        assert_eq!(code, 200);
+        let health: serde_json::Value = serde_json::from_str(&health).unwrap();
+        assert_eq!(health["tracks"], 4, "{health}");
+        assert_eq!(health["version"], VERSION);
+        assert!(health["fixes"].as_i64().unwrap() >= 8, "{health}");
+        assert!(health["system"].is_object(), "{health}");
+
+        let (code, _) = http(addr, "POST", "/api/tracks/import", "not a track").await;
+        assert_eq!(code, 400, "bad uploads are refused");
+    }
 }
