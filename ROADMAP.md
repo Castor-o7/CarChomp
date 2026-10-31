@@ -8,6 +8,10 @@ A box is ticked only when someone has checked the story's "done when" line.
 Code existing is not enough, and a story that needs hardware isn't done until
 it has run on that hardware.
 
+**Progress: 8 of 17 ticked.** All eight were checked on simulators or in CI, and
+none has run on real hardware. The six marked "Needs hardware" stay open until
+they have (CHOMP-3, 5, 7, 8, 10, 12), as do CHOMP-6, 9 and 14.
+
 ## Stories from DESIGN.md's order of work
 
 - [x] **CHOMP-1: Core types, beaconing, KISS and APRS parsing.** Done when:
