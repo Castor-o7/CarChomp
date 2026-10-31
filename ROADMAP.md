@@ -33,9 +33,10 @@ it has run on that hardware.
 - [ ] **CHOMP-8: Installer, kiosk, release bundle, image, CI.** Done when: a `v*`
   tag produces a bundle and image, and that image boots on the reTerminal into the
   kiosk with `carchompd` running. Needs hardware.
-- [ ] **CHOMP-9: Heading-aware matching, per-track colours.** Done when: driving
-  the opposite way counts as a new road, and different tracks draw in different
-  colours.
+- [ ] **CHOMP-9: Heading-aware matching, per-track colours.** Done when: an old
+  track that only crosses the current road does not count as having used it, the
+  same road driven in either direction does, and different tracks draw in
+  different colours.
 - [ ] **CHOMP-10: GPS time through chrony.** Done when: with no RTC or network,
   `chronyc sources` shows gpsd selected and the clock is correct. Needs hardware.
 - [ ] **CHOMP-11: Network access rule.** Done when: localhost and hotspot requests

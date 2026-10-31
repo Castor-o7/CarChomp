@@ -1,5 +1,6 @@
 <script>
   import { untrack } from 'svelte';
+  import { trackColor } from './palette.js';
   import { api, live, ui } from './state.svelte.js';
 
   const NEARBY_METRES = 200;
@@ -54,7 +55,7 @@
 {#each tracks as t (t.id)}
   <section class:hidden={!t.visible}>
     <input value={t.name ?? ''} placeholder={title(t)} onchange={(e) => patch(t.id, { name: e.target.value })} />
-    <small>{t.ended ? length(t) : 'recording'}</small>
+    <small><span class="swatch" style:background={trackColor(t.id)}></span>{t.ended ? length(t) : 'recording'}</small>
     <div>
       <button onclick={() => show(t)}>Show</button>
       <button class:on={t.visible} onclick={() => patch(t.id, { visible: !t.visible })}>On map</button>
@@ -86,6 +87,14 @@
   }
   input {
     width: 100%;
+  }
+  .swatch {
+    display: inline-block;
+    width: 18px;
+    height: 5px;
+    margin-right: 8px;
+    border-radius: 3px;
+    vertical-align: middle;
   }
   .error {
     color: #fca5a5;
