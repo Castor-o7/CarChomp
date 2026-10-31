@@ -12,13 +12,13 @@ it has run on that hardware.
 
 - [ ] **CHOMP-1: Core types, beaconing, KISS and APRS parsing.** Done when:
   `cargo test -p carchomp-core` passes in CI.
-- [ ] **CHOMP-2: gpsd to database, `/ws`, `/api/tracks`.** Done when: a
+- [x] **CHOMP-2: gpsd to database, `/ws`, `/api/tracks`.** Done when: a
   `tools/sim.py` drive creates a track in PostGIS, returned by `/api/tracks` and
   streamed live on `/ws`.
 - [ ] **CHOMP-3: New-road detection, APRS source.** Done when: repeating a sim
   route clears the new-road flag, and a real TNC stores a position, weather
   report, object and bulletin. Needs hardware.
-- [ ] **CHOMP-4: Map UI and track manager.** Done when: in a browser, a sim drive
+- [x] **CHOMP-4: Map UI and track manager.** Done when: in a browser, a sim drive
   shows live position, track overlay and new-road cue, and a track can be managed
   from the UI.
 - [ ] **CHOMP-5: Import/export, health, web updates.** Done when: a GPX file
@@ -39,7 +39,7 @@ it has run on that hardware.
   different colours.
 - [ ] **CHOMP-10: GPS time through chrony.** Done when: with no RTC or network,
   `chronyc sources` shows gpsd selected and the clock is correct. Needs hardware.
-- [ ] **CHOMP-11: Network access rule.** Done when: localhost and hotspot requests
+- [x] **CHOMP-11: Network access rule.** Done when: localhost and hotspot requests
   get full access, others are refused, and a test covers each case.
 - [ ] **CHOMP-12: `--gps` and `--radio` installer options.** Done when: with a real
   receiver and dongle, a fresh install records GPS fixes and live APRS packets.
@@ -54,3 +54,10 @@ it has run on that hardware.
   and every open Dependabot alert has a recorded decision.
 - [ ] **CHOMP-15: CI catches an invalid map style.** Done when: a `line-color`
   expression MapLibre rejects, like the one first written for CHOMP-9, fails CI.
+- [ ] **CHOMP-16: A repo test for the known-road query.** Done when: a test that
+  CI runs against PostGIS exercises `KNOWN_ROAD` and fails if the same road in
+  either direction stops counting as known, or a crossing beyond `road_heading`
+  starts to.
+- [ ] **CHOMP-17: No sprite 404 on a README dev run.** Done when: following the
+  README's "Try it" steps gives a map with no 404 for `sprites/v4/light`, or those
+  steps say that the 404 is expected and how to clear it.
