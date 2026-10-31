@@ -29,7 +29,7 @@ never driven.
 
 It's one Rust daemon, one PostgreSQL/PostGIS database and one Svelte app: a from-scratch take on
 the carputer capstone, built from the stakeholder's original directive
-([stakeholder.md](stakeholder.md)). Design and roadmap: [DESIGN.md](DESIGN.md).
+([stakeholder.md](stakeholder.md)). Design: [DESIGN.md](DESIGN.md). Roadmap: [ROADMAP.md](ROADMAP.md).
 
 > [!IMPORTANT]
 > **CarChomp hasn't met a real GPS or radio yet.** Everything is developed and tested against

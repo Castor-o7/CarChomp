@@ -47,12 +47,12 @@ it has run on that hardware.
 
 ## Found along the way
 
-- [ ] **CHOMP-13: A roadmap the board can track.** Done when: this file gives every
+- [x] **CHOMP-13: A roadmap the board can track.** Done when: this file gives every
   item in DESIGN.md's order of work a permanent ID and a "done when" line.
 - [ ] **CHOMP-14: Clear the Dependabot backlog.** Done when: no Dependabot PR opened
   by 2026-10-30 is still open, each merged with passing CI or closed with a reason,
   and every open Dependabot alert has a recorded decision.
-- [ ] **CHOMP-15: CI catches an invalid map style.** Done when: a `line-color`
+- [x] **CHOMP-15: CI catches an invalid map style.** Done when: a `line-color`
   expression MapLibre rejects, like the one first written for CHOMP-9, fails CI.
 - [ ] **CHOMP-16: A repo test for the known-road query.** Done when: a test that
   CI runs against PostGIS exercises `KNOWN_ROAD` and fails if the same road in
