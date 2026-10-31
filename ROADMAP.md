@@ -9,8 +9,8 @@ Code existing is not enough, and a story that needs hardware isn't done until
 it has run on that hardware.
 
 **Progress: 8 of 17 ticked.** Ticks here mean checked on simulators or in CI (for
-CHOMP-13, by reading this file). None has run on real hardware. The six marked "Needs hardware" stay open until
-they have (CHOMP-3, 5, 7, 8, 10, 12), as do CHOMP-6, 9 and 14.
+CHOMP-13, by reading this file). None has run on real hardware. Still open: the six that need hardware
+(CHOMP-3, 5, 7, 8, 10, 12), and CHOMP-6, 9 and 14, which don't.
 
 ## Stories from DESIGN.md's order of work
 
