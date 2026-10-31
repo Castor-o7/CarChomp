@@ -178,7 +178,7 @@ impl Recorder {
             .bind(self.road_heading)
             .fetch_one(&self.db)
             .await?;
-        if self.set(|s| s.road_new = Some(!known)) {
+        if self.set(|s| s.road_new = Some(known)) {
             tracing::info!("{} road", if known { "known" } else { "new" });
         }
         Ok(())
