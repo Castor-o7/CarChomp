@@ -152,12 +152,14 @@ timestamps, such as a planned route, have no speed to filter by and are kept who
 
     docker compose -f compose.dev.yml up -d --wait       # PostGIS on :5433
     (cd ui && npm install && npm run build)              # UI -> ui/dist
+    tools/fetch_map_assets.sh maps                       # map fonts + sprites (needs git)
     python3 tools/sim.py --gpsd 12947 --kiss 18001 &     # pretend GPS + APRS radio
     cat > dev.toml <<'END'
     database_url = "postgres://carchomp:carchomp@localhost:5433/carchomp"
     gpsd = "127.0.0.1:12947"
     aprs_kiss = "127.0.0.1:18001"
     ui_dir = "ui/dist"
+    maps_dir = "maps"
     END
     cargo run -p carchompd -- dev.toml                   # then open http://localhost:8000
 
@@ -346,9 +348,8 @@ installer does not attempt that.
 
 ## Offline maps (development)
 
-Add `maps_dir = "/some/dir"` to `dev.toml`, run
-`tools/fetch_map_assets.sh /some/dir` once, and have `pmtiles`
-(`brew install pmtiles`) on the PATH. Then use the Maps panel: move the map,
+After the [Try it](#try-it) steps, which set up `maps_dir` and its assets, have
+`pmtiles` (`brew install pmtiles`) on the PATH. Then use the Maps panel: move the map,
 name the region, pick a detail level, download.
 
 ## APRS on the Pi
