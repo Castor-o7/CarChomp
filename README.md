@@ -10,7 +10,8 @@ never driven.
 
 - **"Have I driven this road?"** The badge reads *Been here* or *New road*, with an optional
   chirp as you leave known road. Matching follows your heading, so crossing an old track at
-  an intersection doesn't count, and it needs no road-network data.
+  an intersection doesn't count (a crossing within `road_heading`, 35° by default, does),
+  and it needs no road-network data.
 - **Keeps the shape, not every point.** The APRS SmartBeaconing algorithm decides what gets
   stored: little on a straight road, every bend on a switchback. The screen still sees every fix.
 - **Hears what's around you.** Receive-only APRS through an RTL-SDR dongle brings in nearby
@@ -33,7 +34,8 @@ the carputer capstone, built from the stakeholder's original directive
 > [!IMPORTANT]
 > **CarChomp hasn't met a real GPS or radio yet.** Everything is developed and tested against
 > `tools/sim.py`. GPS, RTL-SDR/Direwolf, chrony, Wi-Fi/hotspot and the web update upload are
-> untested on hardware, and the SD-card image build hasn't been run yet.
+> untested on hardware, and the SD-card image build hasn't been run yet. Downloading an offline
+> map region and drawing it with the network off hasn't been checked end to end either.
 
 ## Layout
 
@@ -175,7 +177,11 @@ in `ui/` proxies to the daemon with hot reload. The API by hand:
     curl localhost:8000/api/tracks/1                     # GeoJSON
     curl 'localhost:8000/api/tracks?near=-122.6587,45.5125,50'
 
-`cargo test` runs the core tests; they need nothing but a Rust toolchain (1.88+).
+`cargo test` runs the tests that need nothing but a Rust toolchain (1.88+). The known-road query
+test needs PostGIS, so it's opt-in, and CI always runs it:
+
+    DATABASE_URL=postgres://carchomp:carchomp@localhost:5433/carchomp \
+      cargo test -p carchompd -- --ignored --exact recorder::tests::known_road_query
 
 ## Install on a Pi
 
