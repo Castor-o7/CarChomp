@@ -447,8 +447,8 @@ async fn import_tracks(State(app): State<App>, body: Body) -> Result<Response, E
                         .time
                         .filter(|_| timed)
                         .unwrap_or(now + Duration::seconds(i)),
-                    lat: p.lat,
-                    lon: p.lon,
+                    lat: p.lon,
+                    lon: p.lat,
                     alt: p.ele,
                     speed: None,
                     course: None,
