@@ -8,13 +8,10 @@
   import { PMTiles, Protocol } from 'pmtiles';
   import { onMount, untrack } from 'svelte';
   import { describe } from './aprs.js';
-  import { TRACK_COLORS } from './palette.js';
+  import { OVERLAY_LAYERS, OVERLAY_SOURCES } from './overlays.js';
   import { api, live, ui } from './state.svelte.js';
 
   const EMPTY = { type: 'FeatureCollection', features: [] };
-  // Incidents (objects) stand out; weather is calm; everything else is a station.
-  const APRS_COLOR = ['match', ['get', 'kind'], 'object', '#9333ea', 'weather', '#0ea5e9', '#dc2626'];
-  const TRACK_COLOR = ['to-color', ['at', ['%', ['get', 'track'], TRACK_COLORS.length], ['literal', TRACK_COLORS]]];
 
   // Keeps one reader per archive URL; a region downloaded again under the
   // same name has the same URL, so readers are dropped on every rebuild.
@@ -80,12 +77,8 @@
     // Runs again after every basemap change, since a new style starts empty.
     map.on('style.load', () => {
       if (!mapStyle) return;
-      for (const id of ['tracks', 'trail', 'aprs']) map.addSource(id, { type: 'geojson', data: EMPTY });
-      const line = { 'line-cap': 'round', 'line-join': 'round' };
-      // Translucent, so roads driven often grow darker than roads driven once.
-      map.addLayer({ id: 'tracks', type: 'line', source: 'tracks', layout: line, paint: { 'line-color': TRACK_COLOR, 'line-width': 5, 'line-opacity': 0.45 } });
-      map.addLayer({ id: 'trail', type: 'line', source: 'trail', layout: line, paint: { 'line-color': '#f97316', 'line-width': 5 } });
-      map.addLayer({ id: 'aprs', type: 'circle', source: 'aprs', paint: { 'circle-radius': 9, 'circle-color': APRS_COLOR, 'circle-stroke-color': '#fff', 'circle-stroke-width': 2 } });
+      for (const id of OVERLAY_SOURCES) map.addSource(id, { type: 'geojson', data: EMPTY });
+      for (const layer of OVERLAY_LAYERS) map.addLayer(layer);
       ready = true;
     });
 
