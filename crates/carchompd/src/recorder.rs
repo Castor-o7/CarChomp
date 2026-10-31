@@ -52,7 +52,7 @@ const KNOWN_ROAD: &str = "
         WHERE s.track_id <> $1
           AND ST_DWithin(s.geom, ST_MakePoint($2, $3)::geography, $4)
           AND ST_DWithin(edge.geom::geography, ST_MakePoint($2, $3)::geography, $4)
-          AND ($5::float8 IS NULL OR $6 >= abs(90 - mod((3690 + $5 - degrees(
+          AND ($5::float8 IS NULL OR $6 + 1000 >= abs(90 - mod((3690 + $5 - degrees(
                   ST_Azimuth(ST_StartPoint(edge.geom)::geography, ST_EndPoint(edge.geom)::geography)))::numeric, 360))))";
 
 struct Recorder {
