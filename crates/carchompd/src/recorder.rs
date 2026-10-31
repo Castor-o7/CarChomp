@@ -345,4 +345,131 @@ mod tests {
         assert!(!road_check_due(Some(t), t + Duration::seconds(1)));
         assert!(road_check_due(Some(t), t + Duration::seconds(3)));
     }
+
+    /// One old track, as (lon, lat) corners; returns its id.
+    async fn old_track(tx: &mut sqlx::PgConnection, corners: &[(f64, f64)]) -> i64 {
+        let id = sqlx::query_scalar("INSERT INTO track (started) VALUES (now()) RETURNING id")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        let points: Vec<String> = corners.iter().map(|(x, y)| format!("{x} {y}")).collect();
+        sqlx::query("INSERT INTO track_segment (track_id, geom) VALUES ($1, $2::geography)")
+            .bind(id)
+            .bind(format!("SRID=4326;LINESTRING({})", points.join(",")))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        id
+    }
+
+    /// `KNOWN_ROAD` with the default radius and tolerance, while on `track`.
+    async fn known(
+        tx: &mut sqlx::PgConnection,
+        track: i64,
+        at: (f64, f64),
+        course: Option<f64>,
+    ) -> bool {
+        let defaults = Config::default();
+        sqlx::query_scalar(KNOWN_ROAD)
+            .bind(track)
+            .bind(at.0)
+            .bind(at.1)
+            .bind(defaults.road_radius)
+            .bind(course)
+            .bind(defaults.road_heading)
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap()
+    }
+
+    /// Needs PostGIS at `DATABASE_URL`, so `cargo test` skips it and CI runs it
+    /// with `--ignored`. Everything is rolled back when `tx` drops.
+    #[tokio::test]
+    #[ignore = "needs PostGIS at DATABASE_URL"]
+    async fn known_road_query() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let db = PgPool::connect(&url).await.unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        let mut tx = db.begin().await.unwrap();
+        let current = 0; // no track has this id, so every old track counts
+
+        // An east-west road, and a point halfway along it.
+        let road = old_track(&mut tx, &[(-122.70, 45.50), (-122.69, 45.50)]).await;
+        let on = (-122.695, 45.50);
+        for (course, expected, case) in [
+            (Some(90.0), true, "same direction"),
+            (Some(270.0), true, "opposite direction"),
+            (Some(0.0), false, "perpendicular crossing"),
+            (Some(180.0), false, "perpendicular crossing, southbound"),
+            (Some(45.0), false, "crossing beyond road_heading"),
+            (
+                Some(60.0),
+                true,
+                "inside road_heading: current tolerance, not a ruling",
+            ),
+            (None, true, "no course: nearness alone decides"),
+        ] {
+            assert_eq!(
+                known(&mut tx, current, on, course).await,
+                expected,
+                "{case}"
+            );
+        }
+
+        // About 150 m north: too far, whatever the heading.
+        let parallel = (-122.695, 45.50135);
+        assert!(
+            !known(&mut tx, current, parallel, Some(90.0)).await,
+            "parallel road"
+        );
+        assert!(
+            !known(&mut tx, current, parallel, None).await,
+            "parallel road, no course"
+        );
+
+        // The track being driven is not an old track.
+        assert!(!known(&mut tx, road, on, Some(90.0)).await, "own track");
+
+        // A road bearing about 350°, so headings wrap across north. Far from
+        // the road above; 0.71 corrects for a degree of longitude at 45° N.
+        let (x, y) = (-122.60, 45.50);
+        let (dx, dy) = (
+            -0.001 * 10f64.to_radians().sin() / 0.71,
+            0.001 * 10f64.to_radians().cos(),
+        );
+        old_track(&mut tx, &[(x - dx, y - dy), (x + dx, y + dy)]).await;
+        for (course, expected, case) in [
+            (Some(10.0), true, "20 degrees off, across north"),
+            (Some(170.0), true, "20 degrees off, reversed"),
+            (Some(80.0), false, "90 degrees off, across north"),
+        ] {
+            assert_eq!(
+                known(&mut tx, current, (x, y), course).await,
+                expected,
+                "{case}"
+            );
+        }
+
+        // An L: east, then north. Each leg answers only for its own heading.
+        let (east, north) = ((-122.50, 45.50), (-122.49, 45.51));
+        old_track(&mut tx, &[east, (north.0, east.1), north]).await;
+        let east_leg = (-122.495, 45.50);
+        let north_leg = (-122.49, 45.505);
+        assert!(
+            known(&mut tx, current, east_leg, Some(90.0)).await,
+            "east leg, eastbound"
+        );
+        assert!(
+            !known(&mut tx, current, east_leg, Some(0.0)).await,
+            "east leg, northbound"
+        );
+        assert!(
+            known(&mut tx, current, north_leg, Some(0.0)).await,
+            "north leg, northbound"
+        );
+        assert!(
+            !known(&mut tx, current, north_leg, Some(90.0)).await,
+            "north leg, eastbound"
+        );
+    }
 }
