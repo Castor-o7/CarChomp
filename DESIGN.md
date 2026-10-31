@@ -111,6 +111,9 @@ joins mid-drive is immediately correct.
 
 ## Order of work
 
+A strikethrough here means built, not proven. [ROADMAP.md](ROADMAP.md) tracks
+what has been checked.
+
 1. ~~core: gpsd types, smart beaconing, KISS + APRS parsing~~
 2. ~~daemon: gpsd source → bus → recorder → PostgreSQL; `/ws`, `/api/tracks`~~
 3. ~~new-road detection; APRS source: positions, weather, objects/items,
