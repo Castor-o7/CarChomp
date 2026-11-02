@@ -8,10 +8,10 @@ A box is ticked only when someone has checked the story's "done when" line.
 Code existing is not enough, and a story that needs hardware isn't done until
 it has run on that hardware.
 
-**Progress: 10 of 17 ticked.** Ticks here mean checked on simulators or in CI (for
+**Progress: 11 of 17 ticked.** Ticks here mean checked on simulators or in CI (for
 CHOMP-13, by reading this file). Only CHOMP-5's update upload has also run on real
-hardware. Still open: the five that need hardware (CHOMP-3, 7, 8, 10, 12), and
-CHOMP-6 and 14, which don't.
+hardware. Still open: the five that need hardware (CHOMP-3, 7, 8, 10, 12), and CHOMP-6, which
+doesn't.
 
 ## Stories from DESIGN.md's order of work
 
@@ -54,7 +54,7 @@ CHOMP-6 and 14, which don't.
 
 - [x] **CHOMP-13: A roadmap the board can track.** Done when: this file gives every
   item in DESIGN.md's order of work a permanent ID and a "done when" line.
-- [ ] **CHOMP-14: Clear the Dependabot backlog.** Done when: no Dependabot PR opened
+- [x] **CHOMP-14: Clear the Dependabot backlog.** Done when: no Dependabot PR opened
   by 2026-10-30 is still open, each merged with passing CI or closed with a reason,
   and every open Dependabot alert has a recorded decision.
 - [x] **CHOMP-15: CI catches an invalid map style.** Done when: a `line-color`
