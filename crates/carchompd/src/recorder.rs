@@ -510,6 +510,40 @@ mod tests {
         flags
     }
 
+    /// Drives legs of (course, fixes), one fix per second at 20 m/s, and returns
+    /// the new-road flag after each fix.
+    async fn drive_legs(
+        rec: &mut Recorder,
+        source: i16,
+        start: OffsetDateTime,
+        from: (f64, f64),
+        legs: &[(f64, u32)],
+    ) -> Vec<Option<bool>> {
+        let (mut lon, mut lat) = from;
+        let mut time = start;
+        let mut flags = Vec::new();
+        for &(course, n) in legs {
+            for _ in 0..n {
+                let fix = Fix {
+                    time,
+                    lat,
+                    lon,
+                    alt: None,
+                    speed: Some(20.0),
+                    course: Some(course),
+                    h_err: None,
+                };
+                rec.fix(source, &fix).await.unwrap();
+                flags.push(rec.status.borrow().road_new);
+                let metres = 20.0 / 111_320.0;
+                lat += metres * course.to_radians().cos();
+                lon += metres * course.to_radians().sin() / lat.to_radians().cos();
+                time += Duration::seconds(1);
+            }
+        }
+        flags
+    }
+
     /// Needs PostGIS: see `known_road_query`. Its own database, as it commits.
     #[tokio::test]
     #[ignore = "needs PostGIS at DATABASE_URL"]
@@ -559,5 +593,31 @@ mod tests {
             "new road: {elsewhere:?}"
         );
         rec.end_track().await.unwrap();
+
+        // One track that leaves the known road for a new one and rejoins: the
+        // flag has to change while driving, not just between tracks.
+        let start = t + lap * 4;
+        let legs = [(90.0, 20), (0.0, 15), (90.0, 10), (180.0, 15), (90.0, 15)];
+        let mut detour = drive_legs(&mut rec, source, start, west_end, &legs).await;
+        detour.dedup();
+        assert_eq!(
+            detour,
+            [Some(false), Some(true), Some(false)],
+            "known, new, known"
+        );
+
+        // Stopping for longer than track_idle ends it, without being told to.
+        assert!(rec.status.borrow().track.is_some(), "still driving");
+        let stopped = Fix {
+            time: start + Duration::seconds(75) + Duration::seconds_f64(rec.track_idle + 1.0),
+            lat: west_end.1,
+            lon: west_end.0,
+            alt: None,
+            speed: Some(0.0),
+            course: None,
+            h_err: None,
+        };
+        rec.fix(source, &stopped).await.unwrap();
+        assert_eq!(*rec.status.borrow(), Status::default(), "idle ended it");
     }
 }

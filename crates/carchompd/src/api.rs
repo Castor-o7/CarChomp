@@ -1094,6 +1094,21 @@ mod tests {
         (a.lon - b.lon).abs() < 1e-6 && (a.lat - b.lat).abs() < 1e-6
     }
 
+    /// `kept` keeps the ends of `sent`, and each point in it is one `sent` has:
+    /// the same time, place and elevation.
+    fn assert_kept_from(sent: &[interchange::Point], kept: &[interchange::Point]) {
+        assert_eq!(kept[0].time, sent[0].time, "first point");
+        assert_eq!(kept.last().unwrap().time, sent.last().unwrap().time, "last");
+        for b in kept {
+            let a = sent
+                .iter()
+                .find(|a| a.time == b.time)
+                .unwrap_or_else(|| panic!("{b:?} was never sent"));
+            assert!(close(a, b), "{a:?} came back as {b:?}");
+            assert_eq!(a.ele, b.ele, "elevation");
+        }
+    }
+
     /// Needs PostGIS at `DATABASE_URL`, so `cargo test` skips it and CI runs
     /// it with `--ignored`. Uses a database of its own, as it commits.
     #[tokio::test]
@@ -1133,44 +1148,69 @@ mod tests {
             assert!(b.time.is_some(), "stored points have times");
         }
 
-        // A recorded drive: thinned on the way in, but its ends and times stay.
-        let timed = r#"<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>
-            <trkpt lat="45.6" lon="-122.7"><time>2026-01-01T10:00:00Z</time></trkpt>
-            <trkpt lat="45.6" lon="-122.698"><time>2026-01-01T10:00:10Z</time></trkpt>
-            <trkpt lat="45.6" lon="-122.696"><time>2026-01-01T10:00:20Z</time></trkpt>
-            <trkpt lat="45.6" lon="-122.694"><time>2026-01-01T10:00:30Z</time></trkpt>
-        </trkseg></trk></gpx>"#;
-        let sent_timed = interchange::parse(timed).unwrap().remove(0);
-        let (code, ids) = http(addr, "POST", "/api/tracks/import", timed).await;
+        // A recorded drive, a minute at 20 m/s: thinned on the way in, but what
+        // stays is exactly what was sent, and its ends stay.
+        let trkpts: String = (0..60)
+            .map(|i| {
+                format!(
+                    r#"<trkpt lat="45.6" lon="{:.6}"><time>2026-01-01T10:00:{i:02}Z</time></trkpt>"#,
+                    -122.7 + 0.00025 * f64::from(i)
+                )
+            })
+            .collect();
+        let timed = format!(
+            r#"<gpx version="1.1" xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>{trkpts}</trkseg></trk></gpx>"#
+        );
+        let sent_timed = interchange::parse(&timed).unwrap().remove(0);
+        let (code, ids) = http(addr, "POST", "/api/tracks/import", &timed).await;
         assert_eq!(code, 200, "{ids}");
         let ids: Vec<i64> = serde_json::from_str(&ids).unwrap();
         let (_, exported) = http(addr, "GET", &format!("/api/tracks/{}/gpx", ids[0]), "").await;
         let drive = interchange::parse(&exported).unwrap().remove(0);
-        for (a, b) in [
-            (&sent_timed.points[0], &drive.points[0]),
-            (
-                sent_timed.points.last().unwrap(),
-                drive.points.last().unwrap(),
-            ),
-        ] {
-            assert!(close(a, b), "{a:?} came back as {b:?}");
-            assert_eq!(a.time, b.time);
-        }
+        assert!(
+            drive.points.len() < sent_timed.points.len(),
+            "not thinned: kept all {}",
+            drive.points.len()
+        );
+        assert_kept_from(&sent_timed.points, &drive.points);
 
-        // Export all holds both, and imports again as what it was.
+        // Export all holds both, the same as exporting each alone.
         let (code, all) = http(addr, "GET", "/api/tracks/export.gpx", "").await;
         assert_eq!(code, 200);
         let tracks = interchange::parse(&all).unwrap();
         assert_eq!(tracks.len(), 2);
+        let named = |tracks: &[interchange::Track], name: Option<&str>| -> Vec<_> {
+            tracks
+                .iter()
+                .filter(|t| t.name.as_deref() == name)
+                .cloned()
+                .collect()
+        };
+        assert_eq!(named(&tracks, Some("Round trip"))[0].points, back.points);
+        assert_eq!(named(&tracks, None)[0].points, drive.points);
+
+        // Importing that again gives each track a second copy. Everything is
+        // timed by now, so the copies may be thinned, but only to what it was.
         let (code, _) = http(addr, "POST", "/api/tracks/import", &all).await;
         assert_eq!(code, 200);
+        let (code, all) = http(addr, "GET", "/api/tracks/export.gpx", "").await;
+        assert_eq!(code, 200);
+        let again = interchange::parse(&all).unwrap();
+        for (name, original) in [(Some("Round trip"), &back), (None, &drive)] {
+            let copies = named(&again, name);
+            assert_eq!(copies.len(), 2, "{name:?}");
+            for copy in &copies {
+                assert_kept_from(&original.points, &copy.points);
+            }
+        }
 
         let (code, health) = http(addr, "GET", "/api/health", "").await;
         assert_eq!(code, 200);
         let health: serde_json::Value = serde_json::from_str(&health).unwrap();
         assert_eq!(health["tracks"], 4, "{health}");
         assert_eq!(health["version"], VERSION);
-        assert!(health["fixes"].as_i64().unwrap() >= 8, "{health}");
+        let stored: usize = again.iter().map(|t| t.points.len()).sum();
+        assert_eq!(health["fixes"], stored, "{health}");
         assert!(health["system"].is_object(), "{health}");
 
         let (code, _) = http(addr, "POST", "/api/tracks/import", "not a track").await;
