@@ -39,9 +39,9 @@ don't.
   tag produces a bundle and image, and that image boots on the reTerminal into the
   kiosk with `carchompd` running. Needs hardware.
 - [ ] **CHOMP-9: Heading-aware matching, per-track colours.** Done when: an old
-  track that only crosses the current road does not count as having used it, the
-  same road driven in either direction does, and different tracks draw in
-  different colours.
+  track that crosses the current road at more than `road_heading` (35° by default)
+  does not count as having used it, the same road driven in either direction does,
+  and different tracks draw in different colours.
 - [ ] **CHOMP-10: GPS time through chrony.** Done when: with no RTC or network,
   `chronyc sources` shows gpsd selected and the clock is correct. Needs hardware.
 - [x] **CHOMP-11: Network access rule.** Done when: localhost and hotspot requests
