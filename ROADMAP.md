@@ -8,10 +8,10 @@ A box is ticked only when someone has checked the story's "done when" line.
 Code existing is not enough, and a story that needs hardware isn't done until
 it has run on that hardware.
 
-**Progress: 9 of 17 ticked.** Ticks here mean checked on simulators or in CI (for
-CHOMP-13, by reading this file). None has run on real hardware. Still open: the
-six that need hardware (CHOMP-3, 5, 7, 8, 10, 12), and CHOMP-6 and 14, which
-don't.
+**Progress: 10 of 17 ticked.** Ticks here mean checked on simulators or in CI (for
+CHOMP-13, by reading this file). Only CHOMP-5's update upload has also run on real
+hardware. Still open: the five that need hardware (CHOMP-3, 7, 8, 10, 12), and
+CHOMP-6 and 14, which don't.
 
 ## Stories from DESIGN.md's order of work
 
@@ -26,7 +26,7 @@ don't.
 - [x] **CHOMP-4: Map UI and track manager.** Done when: in a browser, a sim drive
   shows live position, track overlay and new-road cue, and a track can be managed
   from the UI.
-- [ ] **CHOMP-5: Import/export, health, web updates.** Done when: a GPX file
+- [x] **CHOMP-5: Import/export, health, web updates.** Done when: a GPX file
   round-trips through import and export, `/api/health` responds, and a
   `tools/bundle.sh` bundle uploaded on the reTerminal updates it and the daemon
   comes back. Needs hardware.
