@@ -35,7 +35,8 @@ the carputer capstone, built from the stakeholder's original directive
 > **CarChomp hasn't met a real GPS or radio yet.** Everything is developed and tested against
 > `tools/sim.py`. GPS, RTL-SDR/Direwolf, chrony, Wi-Fi/hotspot and the web update upload are
 > untested on hardware, and the SD-card image build hasn't been run yet. Offline map regions have been
-> downloaded and drawn on a development machine only, with the browser blocked from other hosts.
+> downloaded and drawn on a development machine with the browser blocked from other hosts, but not
+> yet with the network actually off.
 
 ## Layout
 
