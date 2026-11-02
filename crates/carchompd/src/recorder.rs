@@ -409,7 +409,7 @@ mod tests {
             (
                 Some(60.0),
                 true,
-                "inside road_heading: current tolerance, not a ruling",
+                "crossing inside road_heading counts as known",
             ),
             (None, true, "no course: nearness alone decides"),
         ] {
@@ -619,5 +619,65 @@ mod tests {
         };
         rec.fix(source, &stopped).await.unwrap();
         assert_eq!(*rec.status.borrow(), Status::default(), "idle ended it");
+    }
+
+    /// Needs PostGIS: see `known_road_query`. Its own database, as it commits.
+    /// The receiver is unplugged mid-drive: no fix ever arrives to say the car
+    /// stopped, so only the local deadline can end the track.
+    #[tokio::test]
+    #[ignore = "needs PostGIS at DATABASE_URL"]
+    async fn silence_ends_the_track_at_the_deadline() {
+        let db = crate::test_db::create("idle_deadline").await;
+        let source = source_id(&db, "gps", "test").await.unwrap();
+        let (bus, _) = tokio::sync::broadcast::channel(16);
+        let (status, mut seen) = watch::channel(Status::default());
+        let config = Config {
+            track_idle: 0.5,
+            ..Config::default()
+        };
+        tokio::spawn(run(db.clone(), bus.clone(), status, &config));
+
+        // The recorder subscribes once it first runs, so keep sending until it
+        // has heard: fixes sent before then are lost. Then fall silent.
+        let start = OffsetDateTime::now_utc();
+        let fix = |ms: i64, lon: f64| Event {
+            source,
+            obs: Observation::Fix(Fix {
+                time: start + Duration::milliseconds(ms),
+                lat: 45.5,
+                lon,
+                alt: None,
+                speed: Some(20.0),
+                course: Some(90.0),
+                h_err: None,
+            }),
+        };
+        let mut sent = 0;
+        let track = loop {
+            let _ = bus.send(fix(10 * sent, -122.7));
+            sent += 1;
+            if let Some(track) = seen.borrow().track {
+                break track;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+
+        // Far enough along that the track is long enough to keep.
+        bus.send(fix(10 * sent, -122.69)).unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            seen.wait_for(|s| s.track.is_none()),
+        )
+        .await
+        .expect("silence should end the track")
+        .unwrap();
+        let ended: Option<OffsetDateTime> =
+            sqlx::query_scalar("SELECT ended FROM track WHERE id = $1")
+                .bind(track)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert!(ended.is_some(), "the track was finished in the database");
     }
 }
