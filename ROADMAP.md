@@ -8,10 +8,10 @@ A box is ticked only when someone has checked the story's "done when" line.
 Code existing is not enough, and a story that needs hardware isn't done until
 it has run on that hardware.
 
-**Progress: 9 of 17 ticked.** Ticks here mean checked on simulators or in CI (for
+**Progress: 10 of 17 ticked.** Ticks here mean checked on simulators or in CI (for
 CHOMP-13, by reading this file). None has run on real hardware. Still open: the
-six that need hardware (CHOMP-3, 5, 7, 8, 10, 12), and CHOMP-6 and 14, which
-don't.
+six that need hardware (CHOMP-3, 5, 7, 8, 10, 12), and CHOMP-14, which
+doesn't.
 
 ## Stories from DESIGN.md's order of work
 
@@ -30,7 +30,7 @@ don't.
   round-trips through import and export, `/api/health` responds, and a
   `tools/bundle.sh` bundle uploaded on the reTerminal updates it and the daemon
   comes back. Needs hardware.
-- [ ] **CHOMP-6: Offline maps.** Done when: a region downloads and draws with the
+- [x] **CHOMP-6: Offline maps.** Done when: a region downloads and draws with the
   network off, and cancel and delete leave no partial files.
 - [ ] **CHOMP-7: Wi-Fi and hotspot fallback.** Done when: on the reTerminal, scan,
   join and forget work, and the hotspot comes up when no known network is in
