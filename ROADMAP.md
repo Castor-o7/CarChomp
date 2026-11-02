@@ -8,9 +8,9 @@ A box is ticked only when someone has checked the story's "done when" line.
 Code existing is not enough, and a story that needs hardware isn't done until
 it has run on that hardware.
 
-**Progress: 8 of 17 ticked.** Ticks here mean checked on simulators or in CI (for
+**Progress: 9 of 17 ticked.** Ticks here mean checked on simulators or in CI (for
 CHOMP-13, by reading this file). None has run on real hardware. Still open: the
-six that need hardware (CHOMP-3, 5, 7, 8, 10, 12), and CHOMP-6, 9 and 14, which
+six that need hardware (CHOMP-3, 5, 7, 8, 10, 12), and CHOMP-6 and 14, which
 don't.
 
 ## Stories from DESIGN.md's order of work
@@ -38,7 +38,7 @@ don't.
 - [ ] **CHOMP-8: Installer, kiosk, release bundle, image, CI.** Done when: a `v*`
   tag produces a bundle and image, and that image boots on the reTerminal into the
   kiosk with `carchompd` running. Needs hardware.
-- [ ] **CHOMP-9: Heading-aware matching, per-track colours.** Done when: an old
+- [x] **CHOMP-9: Heading-aware matching, per-track colours.** Done when: an old
   track that crosses the current road at more than `road_heading` (35° by default)
   does not count as having used it, the same road driven in either direction does,
   and different tracks draw in different colours.
