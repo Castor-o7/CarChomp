@@ -409,7 +409,7 @@ mod tests {
             (
                 Some(60.0),
                 true,
-                "inside road_heading: current tolerance, not a ruling",
+                "crossing inside road_heading counts as known",
             ),
             (None, true, "no course: nearness alone decides"),
         ] {
@@ -619,5 +619,62 @@ mod tests {
         };
         rec.fix(source, &stopped).await.unwrap();
         assert_eq!(*rec.status.borrow(), Status::default(), "idle ended it");
+    }
+
+    /// Needs PostGIS: see `known_road_query`. Its own database, as it commits.
+    /// The receiver is unplugged: no fix ever arrives to say the car stopped,
+    /// so only the local deadline can end the track. The car never moves, so
+    /// each track is too short to keep and finishing removes it. A slow start
+    /// can let the deadline beat queued fixes, which start another track, so
+    /// this waits for all of them to go rather than following one.
+    #[tokio::test]
+    #[ignore = "needs PostGIS at DATABASE_URL"]
+    async fn silence_ends_the_track_at_the_deadline() {
+        let db = crate::test_db::create("idle_deadline").await;
+        let source = source_id(&db, "gps", "test").await.unwrap();
+        let (bus, _) = tokio::sync::broadcast::channel(16);
+        let (status, seen) = watch::channel(Status::default());
+        let config = Config {
+            track_idle: 0.5,
+            ..Config::default()
+        };
+        tokio::spawn(run(db.clone(), bus.clone(), status, &config));
+
+        // The recorder subscribes once it first runs, so keep sending until it
+        // has heard: fixes sent before then are lost. Then fall silent.
+        let start = OffsetDateTime::now_utc();
+        let mut sent = 0;
+        while seen.borrow().track.is_none() {
+            let _ = bus.send(Event {
+                source,
+                obs: Observation::Fix(Fix {
+                    time: start + Duration::milliseconds(10 * sent),
+                    lat: 45.5,
+                    lon: -122.7,
+                    alt: None,
+                    speed: Some(20.0),
+                    course: Some(90.0),
+                    h_err: None,
+                }),
+            });
+            sent += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let gone = async {
+            loop {
+                let tracks: i64 = sqlx::query_scalar("SELECT count(*) FROM track")
+                    .fetch_one(&db)
+                    .await
+                    .unwrap();
+                if tracks == 0 && seen.borrow().track.is_none() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), gone)
+            .await
+            .expect("silence should end the track");
     }
 }

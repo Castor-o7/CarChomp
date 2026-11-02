@@ -1173,6 +1173,12 @@ mod tests {
             drive.points.len()
         );
         assert_kept_from(&sent_timed.points, &drive.points);
+        // At this speed a fix is due about every 20 s, so a longer gap means
+        // thinning threw away more than it should.
+        for pair in drive.points.windows(2) {
+            let gap = pair[1].time.unwrap() - pair[0].time.unwrap();
+            assert!(gap.whole_seconds() <= 25, "thinned too hard: {gap}");
+        }
 
         // Export all holds both, the same as exporting each alone.
         let (code, all) = http(addr, "GET", "/api/tracks/export.gpx", "").await;
