@@ -1,0 +1,59 @@
+# Claude Code on issues and PRs: mention @claude in a comment and it answers,
+# reviews, or pushes a claude/ branch for you to open as a PR.
+#
+# Locked down in layers:
+#   1. Only Castor-o7 can trigger it (the `if:` below). The action also refuses
+#      anyone without write access, and bots, on its own.
+#   2. Claude only reads comments from Castor-o7 and itself, so text others
+#      post on this public repo can't steer it (prompt injection).
+#   3. No pull_request_target, so fork code never runs with these secrets.
+#   4. It can't touch main: the "Protect main" ruleset requires a PR and CI,
+#      and Claude only pushes claude/ branches. You open and merge the PR.
+#   5. Actions pinned to commit SHAs; turns and run time are capped.
+name: Claude
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  issues:
+    types: [opened]
+
+permissions: {}
+
+jobs:
+  claude:
+    if: |
+      github.actor == 'Castor-o7' && (
+        (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+        (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+        (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # One run per issue or PR at a time; a second mention waits its turn.
+    concurrency:
+      group: claude-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: write # push claude/ branches
+      pull-requests: write # comment on and review PRs
+      issues: write # comment on issues
+      id-token: write # exchange for the Claude GitHub App's short-lived token
+      actions: read # read CI results on PRs
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          include_comments_by_actor: "Castor-o7,claude[bot]"
+          claude_args: |
+            --max-turns 30
+            --allowedTools "Bash(cargo fmt:*),Bash(cargo clippy:*),Bash(cargo test:*),Bash(cargo build:*),Bash(npm ci),Bash(npm run build)"
