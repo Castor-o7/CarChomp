@@ -31,13 +31,6 @@ It's one Rust daemon, one PostgreSQL/PostGIS database and one Svelte app: a from
 the carputer capstone, built from the stakeholder's original directive
 ([stakeholder.md](stakeholder.md)). Design: [DESIGN.md](DESIGN.md). Roadmap: [ROADMAP.md](ROADMAP.md).
 
-> [!IMPORTANT]
-> **CarChomp hasn't met a real GPS or radio yet.** Everything is developed and tested against
-> `tools/sim.py`. GPS, RTL-SDR/Direwolf, chrony and Wi-Fi/hotspot are untested on hardware; a
-> bundle upload to the update API has run once on a reTerminal, and the SD-card image build hasn't been run yet. Offline map regions have been
-> downloaded and drawn on a development machine with the browser blocked from other hosts, but not
-> yet with the network actually off.
-
 ## Layout
 
     crates/carchomp-core   pure logic: gpsd, SmartBeaconing, KISS, APRS  (no I/O)
@@ -183,6 +176,22 @@ so they're opt-in, and CI always runs them. Some create their own `carchomp_test
 
     DATABASE_URL=postgres://carchomp:carchomp@localhost:5433/carchomp \
       cargo test -p carchompd -- --ignored
+
+## Status
+
+Built and tested end to end on simulated sensors: `tools/sim.py` stands in for the GPS and the
+radio, and CI runs every test, including the ones against PostGIS. 11 of the 17 stories in
+[ROADMAP.md](ROADMAP.md) are done. Of the real hardware, only the web update has been tried so far:
+a bundle uploaded to a reTerminal installed and the daemon came back.
+
+Next, on the reTerminal:
+
+- GPS fixes from a real receiver, and the clock set from them through chrony.
+- APRS from an RTL-SDR dongle through Direwolf.
+- Wi-Fi, and the hotspot coming up when no known network is in range.
+- Building the SD-card image and booting it into the kiosk.
+- Offline maps with the network actually off. So far a region has been downloaded and drawn with
+  the browser blocked from other hosts, not with the network down.
 
 ## Install on a Pi
 
