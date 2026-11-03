@@ -179,12 +179,14 @@ so they're opt-in, and CI always runs them. Some create their own `carchomp_test
 
 ## Status
 
-Built and tested end to end on simulated sensors: `tools/sim.py` stands in for the GPS and the
-radio, and CI runs every test, including the ones against PostGIS. 11 of the 17 stories in
-[ROADMAP.md](ROADMAP.md) are done. Of the real hardware, only the web update has been tried so far:
-a bundle uploaded to a reTerminal installed and the daemon came back.
+CarChomp is a rewrite of carputer, which ran on a Raspberry Pi with a GPS module and an RTL-SDR, the
+hardware [stakeholder.md](stakeholder.md) describes. The rewrite is built and tested end to end on
+simulated sensors: `tools/sim.py` stands in for the GPS and the radio, and CI runs every test, including
+the ones against PostGIS. 11 of the 17 stories in [ROADMAP.md](ROADMAP.md) are done. On its own
+hardware so far, a web update ran on a reTerminal: a bundle uploaded there installed, and the daemon
+came back.
 
-Next, on the reTerminal:
+The rewrite's own hardware runs come next, on the reTerminal:
 
 - GPS fixes from a real receiver, and the clock set from them through chrony.
 - APRS from an RTL-SDR dongle through Direwolf.
